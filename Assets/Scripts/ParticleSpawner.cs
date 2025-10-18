@@ -5,7 +5,7 @@ using UnityEngine;
 public class ParticleSpawner : MonoBehaviour
 {
     public GameObject particlePrefab; // optional prefab; if null a simple one is created at runtime
-    public int spawnCount = 50;
+    public int spawnCount = 50; // NOT dynamic (won't respawn existing particles)
     public float particleDiameter = 0.18f;
     public float bounce = 0.05f;   // 0..1
     public float damping = 1.0f;   // linear + angular damping applied to spawned bodies
@@ -15,12 +15,20 @@ public class ParticleSpawner : MonoBehaviour
     [Tooltip("Higher = faster gravity changes")]
     public float gravityTransitionSpeed = 10f;
 
-    // attempts to avoid overlap when placing particles
+    // placement settings (not dynamic for existing particles)
     public int maxPlacementAttemptsPerParticle = 50;
     public float placementMargin = 0.01f;
 
     Sprite circleSprite;
     Vector2 currentGravity;
+
+    // previous values used to detect inspector changes
+    float prevParticleDiameter;
+    float prevBounce;
+    float prevDamping;
+    Vector2 prevGravity;
+    float prevGravityTransitionSpeed;
+    float prevPlacementMargin;
 
     void Awake()
     {
@@ -32,11 +40,21 @@ public class ParticleSpawner : MonoBehaviour
 
         if (particlePrefab == null)
             particlePrefab = CreateDefaultParticlePrefab();
+
+        // record previous values so first Update can detect changes
+        prevParticleDiameter = particleDiameter;
+        prevBounce = bounce;
+        prevDamping = damping;
+        prevGravity = gravity;
+        prevGravityTransitionSpeed = gravityTransitionSpeed;
+        prevPlacementMargin = placementMargin;
     }
 
     void Start()
     {
         SpawnAllInsideContainer();
+        // ensure spawned particles inherit current parameters
+        ApplyAllToExistingParticles();
     }
 
     void Update()
@@ -47,6 +65,38 @@ public class ParticleSpawner : MonoBehaviour
             float t = 1f - Mathf.Exp(-gravityTransitionSpeed * Time.deltaTime);
             currentGravity = Vector2.Lerp(currentGravity, gravity, t);
             Physics2D.gravity = currentGravity;
+        }
+
+        // detect and apply parameter changes to already spawned particles
+        if (!Mathf.Approximately(particleDiameter, prevParticleDiameter))
+        {
+            ApplyScaleToExistingParticles();
+            prevParticleDiameter = particleDiameter;
+        }
+
+        if (!Mathf.Approximately(bounce, prevBounce))
+        {
+            ApplyBounceToExistingParticles();
+            prevBounce = bounce;
+        }
+
+        if (!Mathf.Approximately(damping, prevDamping))
+        {
+            ApplyDampingToExistingParticles();
+            prevDamping = damping;
+        }
+
+        if (!Mathf.Approximately(gravityTransitionSpeed, prevGravityTransitionSpeed))
+        {
+            // just update stored value so gravity smoothing uses new speed
+            prevGravityTransitionSpeed = gravityTransitionSpeed;
+        }
+
+        // placementMargin changes do not move already spawned particles,
+        // but we still track the value so it's clear it changed
+        if (!Mathf.Approximately(placementMargin, prevPlacementMargin))
+        {
+            prevPlacementMargin = placementMargin;
         }
     }
 
@@ -63,7 +113,7 @@ public class ParticleSpawner : MonoBehaviour
 
     void SpawnAllInsideContainer()
     {
-        ContainerBuilder cb = FindObjectOfType<ContainerBuilder>();
+        ContainerBuilder cb = FindFirstObjectByType<ContainerBuilder>();
 
         float halfWidth = cb != null ? cb.width / 2f : 1.5f;
         float halfHeight = cb != null ? cb.height / 2f : 1.0f;
@@ -136,7 +186,14 @@ public class ParticleSpawner : MonoBehaviour
                 rb.linearDamping = damping;
                 rb.angularDamping = damping;
             }
+
+            // ensure collider and material are set to match bounce
+            var col = p.GetComponent<CircleCollider2D>();
+            if (col == null) col = p.AddComponent<CircleCollider2D>();
+            // keep radius default (0.5) and rely on localScale for final size
+            SetColliderBounce(col, bounce);
         }
+        particlePrefab.SetActive(false); // disable prefab after use
     }
 
     void CreateCircleSprite()
@@ -188,6 +245,83 @@ public class ParticleSpawner : MonoBehaviour
         // keep as a usable runtime prefab
         p.SetActive(true);
         return p;
+    }
+
+    // apply changes to all existing spawned particles
+    void ApplyAllToExistingParticles()
+    {
+        ApplyScaleToExistingParticles();
+        ApplyBounceToExistingParticles();
+        ApplyDampingToExistingParticles();
+    }
+
+    void ApplyScaleToExistingParticles()
+    {
+        foreach (Transform child in transform)
+        {
+            // avoid modifying non-particle children accidentally
+            var sr = child.GetComponent<SpriteRenderer>();
+            if (sr == null) continue;
+            child.localScale = new Vector3(particleDiameter, particleDiameter, 1f);
+            // collider radius remains 0.5; final world size is controlled by localScale
+        }
+    }
+
+    void ApplyBounceToExistingParticles()
+    {
+        foreach (var col in GetComponentsInChildren<CircleCollider2D>())
+        {
+            SetColliderBounce(col, bounce);
+        }
+    }
+
+    void ApplyDampingToExistingParticles()
+    {
+        foreach (var rb in GetComponentsInChildren<Rigidbody2D>())
+        {
+            // skip kinematic/static bodies (shouldn't be any for particles)
+            if (rb.bodyType != RigidbodyType2D.Dynamic) continue;
+            rb.linearDamping = damping;
+            rb.angularDamping = damping;
+        }
+    }
+
+    void SetColliderBounce(CircleCollider2D col, float b)
+    {
+        // assign a dedicated runtime material so changing bounce doesn't affect other assets
+        PhysicsMaterial2D mat = col.sharedMaterial;
+        bool needNew = mat == null;
+
+        if (!needNew)
+        {
+            // avoid modifying an asset material - create a runtime copy if name doesn't contain "runtime"
+            if (!mat.name.Contains("runtime"))
+                needNew = true;
+        }
+
+        if (needNew)
+        {
+            mat = new PhysicsMaterial2D("runtime_dynMat");
+            mat.friction = 0.4f;
+        }
+
+        mat.bounciness = Mathf.Clamp01(b);
+        col.sharedMaterial = mat;
+    }
+
+    void OnValidate()
+    {
+        // in editor, if values changed, apply them to existing spawned particles for immediate feedback
+        if (!Application.isPlaying)
+        {
+            // only apply visual/inspector changes; we won't change spawnCount/placement.
+            prevParticleDiameter = particleDiameter;
+            prevBounce = bounce;
+            prevDamping = damping;
+            prevPlacementMargin = placementMargin;
+            ApplyAllToExistingParticles();
+            // don't touch physics gravity in editor OnValidate
+        }
     }
 }
 // ...existing code...
