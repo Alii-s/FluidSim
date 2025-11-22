@@ -1,38 +1,42 @@
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using UnityEngine;
+#if ENABLE_INPUT_SYSTEM
+using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.Controls;
+#endif
 
 public class ParticleSpawner : MonoBehaviour
 {
+    [Header("Particles")]
     public GameObject particlePrefab;
     public int spawnCount = 50;
     public float particleDiameter = 0.18f;
     public float bounce = 0.05f;
     public float damping = 1.0f;
 
-    [Header("Gravity (dynamic)")]
+    [Header("Gravity")]
     public Vector2 gravity = new Vector2(0f, -9.81f);
-    [Tooltip("Higher = faster gravity changes")]
     public float gravityTransitionSpeed = 10f;
 
+    [Header("Placement")]
     public int maxPlacementAttemptsPerParticle = 50;
     public float placementMargin = 0.01f;
 
-    [Header("SPH (Parallel Only)")]
-    public float smoothingRadius = 0.4f;     // h
-    public float restDensity = 1f;           // ρ0
-    public float particleMass = 1f;          // m
-    public float stiffness = 50f;            // k
-    public float viscosity = 0.1f;           // μ
+    [Header("SPH")]
+    public float smoothingRadius = 0.4f;
+    public float restDensity = 10f;
+    public float particleMass = 1f;
+    public float stiffness = 50f;
+    public float viscosity = 0.1f;
     public float maxForceClamp = 200f;
-    public bool autoSetRestDensity = true;   // <-- add this
+    public bool autoSetRestDensity = true;
 
     [Header("Velocity Color")]
     public bool enableVelocityColor = true;
     public int velocityColorSkipFrames = 0;
     public float maxColorSpeed = 1f;
-    public Color slowColor = Color.cyan;
-    public Color fastColor = Color.red;
+    public Gradient velocityGradient; // replaces slow/fast colors
 
     [Header("Collision Control")]
     public bool disableParticleSelfCollision = true;
@@ -42,17 +46,34 @@ public class ParticleSpawner : MonoBehaviour
     public bool useSpatialHash = true;
 
     [Header("Bounds")]
-    public float boundsBounceFactor = 1f; // velocity inversion scale
-    public bool useAABBBounds = true;     // enable manual box constraint when physical walls disabled
+    public float boundsBounceFactor = 1f;
+    public bool useAABBBounds = true;
 
     [Header("Boundary Control")]
     public bool spawnOnFrameEdges = false;
     public bool useWallRepulsion = true;
     public float wallRepulsionStrength = 40f;
     public float wallRepulsionDistance = 0.3f;
-    public bool useGhostBoundary = true;
-    public float ghostSpacing = 0.25f;
 
+    [Header("Simulation Control")]
+    public bool paused = false;
+    public KeyCode togglePauseKey = KeyCode.Space;
+    public KeyCode stepKey = KeyCode.F;          // single frame step while paused
+
+    [Header("Mouse Forces")]
+    public bool enableMouseForces = true;
+    public float mouseForceRadius = 1.2f;
+    public float attractionStrength = 60f;
+    public float repulsionStrength = 60f;
+    public AnimationCurve forceFalloff = AnimationCurve.EaseInOut(0, 1, 1, 0); // distance (0..1) -> scale
+
+    [Header("Mouse Lift Only")]
+    public bool mouseLiftOnly = true;
+    public float mouseLiftStrength = 80f;          // upward force
+    public float mouseLiftRadius = 1.2f;           // area of effect
+    public AnimationCurve mouseLiftFalloff = AnimationCurve.EaseInOut(0,1,1,0);
+
+    // Hash
     Dictionary<Vector2Int, List<int>> _hash;
     float _cellSize;
     Vector2 _hashOrigin;
@@ -65,6 +86,7 @@ public class ParticleSpawner : MonoBehaviour
     float[] pressures;
     Vector2[] predictedPositions;
 
+    // Forces
     Vector2[] _forceAccum;
     object[] _locks;
 
@@ -79,16 +101,19 @@ public class ParticleSpawner : MonoBehaviour
     int _particleLayerIndex = -1;
     int _colorFrameCounter = 0;
 
-    // Change tracking
+    // Live-change tracking
     float prevParticleDiameter;
     float prevBounce;
     float prevDamping;
-    float prevGravityTransitionSpeed;
-    float prevPlacementMargin;
 
-    // Ghost boundary storage
-    Vector2[] ghostPositions;
-    int ghostCount;
+    // private state fields
+    bool _stepRequested;
+    Vector2 _mouseWorld;
+    bool _mouseAttract;
+    bool _mouseRepel;
+
+    // track pause state transition
+    bool _wasPaused; 
 
     void Awake()
     {
@@ -98,33 +123,22 @@ public class ParticleSpawner : MonoBehaviour
         if (particlePrefab == null)
             particlePrefab = CreateDefaultParticlePrefab();
         _particleLayerIndex = LayerMask.NameToLayer(particleLayerName);
+
         prevParticleDiameter = particleDiameter;
         prevBounce = bounce;
         prevDamping = damping;
-        prevGravityTransitionSpeed = gravityTransitionSpeed;
-        prevPlacementMargin = placementMargin;
     }
 
     void Start()
     {
         SpawnAllInsideContainer();
-        if (useGhostBoundary) GenerateGhostBoundaryParticles();
-
-        if (autoSetRestDensity)
-        {
-            PrecomputeKernelConstants();
-            restDensity = ComputeAverageInitialDensity();
-            if (densities != null)
-                for (int i = 0; i < densities.Length; i++) densities[i] = restDensity;
-        }
-
         ApplyAllToExistingParticles();
         ApplyParticleLayerSettings();
+        RemoveLegacyWallColliders(); // NEW
     }
 
     void Update()
     {
-        // Smooth gravity
         if (!Mathf.Approximately(currentGravity.x, gravity.x) || !Mathf.Approximately(currentGravity.y, gravity.y))
         {
             float t = 1f - Mathf.Exp(-gravityTransitionSpeed * Time.deltaTime);
@@ -132,7 +146,6 @@ public class ParticleSpawner : MonoBehaviour
             Physics2D.gravity = currentGravity;
         }
 
-        // Live adjustments
         if (!Mathf.Approximately(particleDiameter, prevParticleDiameter))
         {
             ApplyScaleToExistingParticles();
@@ -148,10 +161,6 @@ public class ParticleSpawner : MonoBehaviour
             ApplyDampingToExistingParticles();
             prevDamping = damping;
         }
-        if (!Mathf.Approximately(gravityTransitionSpeed, prevGravityTransitionSpeed))
-            prevGravityTransitionSpeed = gravityTransitionSpeed;
-        if (!Mathf.Approximately(placementMargin, prevPlacementMargin))
-            prevPlacementMargin = placementMargin;
 
         UpdateParticleArrays();
 
@@ -164,18 +173,24 @@ public class ParticleSpawner : MonoBehaviour
             }
             else _colorFrameCounter++;
         }
-        else
-        {
-            ResetVelocityColorsIfNeeded();
-        }
+        else ResetVelocityColorsIfNeeded();
+
+        HandlePauseInput();
+        CaptureMouseInput();
+        UpdatePauseState();          // NEW
+        TryStepWhilePaused();        // NEW
     }
 
     void FixedUpdate()
     {
-        SPHStep(); // always parallel SPH
+        if (paused) return; // physics disabled, skip SPH
+        SPHStep();
+        ApplyMouseForces();
         if (useAABBBounds) ConstrainParticlesToBox();
+        // physics will run automatically when not paused
     }
 
+    // ---- SPH core ----
     void SPHStep()
     {
         if (particles == null) return;
@@ -194,9 +209,7 @@ public class ParticleSpawner : MonoBehaviour
 
         float dt = Time.fixedDeltaTime;
         PredictPositions(dt, n);
-
         if (useSpatialHash) BuildSpatialHash(n, predictedPositions);
-
         ComputeDensitiesParallelPredicted(n);
         ComputePressures(n);
         ApplySPHForcesParallelPredicted(n);
@@ -215,7 +228,7 @@ public class ParticleSpawner : MonoBehaviour
         if (predictedPositions == null || predictedPositions.Length != n) predictedPositions = new Vector2[n];
     }
 
-    // ----- Spatial Hash -----
+    // ---- Spatial hashing ----
     void BuildSpatialHash(int n, Vector2[] sourcePositions)
     {
         _cellSize = smoothingRadius;
@@ -228,8 +241,9 @@ public class ParticleSpawner : MonoBehaviour
             if (p.y < minY) minY = p.y;
         }
         _hashOrigin = new Vector2(minX, minY) - Vector2.one * _cellSize;
-        if (_hash == null) _hash = new Dictionary<Vector2Int, List<int>>();
+        _hash ??= new Dictionary<Vector2Int, List<int>>();
         _hash.Clear();
+
         for (int i = 0; i < n; i++)
         {
             if (particles[i] == null) continue;
@@ -268,7 +282,7 @@ public class ParticleSpawner : MonoBehaviour
         for (int i = 0; i < n; i++) yield return i;
     }
 
-    // ----- Density (parallel, predicted) -----
+    // ---- Density (predicted) ----
     void ComputeDensitiesParallelPredicted(int n)
     {
         float h = smoothingRadius;
@@ -282,7 +296,6 @@ public class ParticleSpawner : MonoBehaviour
             float rho = 0f;
             Vector2 pi = predictedPositions[i];
 
-            // Fluid-fluid
             if (useSpatialHash)
             {
                 Vector2Int cell = WorldToCell(pi);
@@ -306,23 +319,11 @@ public class ParticleSpawner : MonoBehaviour
                 }
             }
 
-            // Ghost contribution (acts like solid boundary density support)
-            if (useGhostBoundary && ghostPositions != null)
-            {
-                for (int g = 0; g < ghostCount; g++)
-                {
-                    float r2 = (pi - ghostPositions[g]).sqrMagnitude;
-                    if (r2 >= h2) continue;
-                    float term = h2 - r2;
-                    rho += particleMass * _poly6Const * term * term * term;
-                }
-            }
-
             densities[i] = Mathf.Max(rho, restDensity * 0.5f);
         });
     }
 
-    // ----- Pressure -----
+    // ---- Pressure ----
     void ComputePressures(int n)
     {
         for (int i = 0; i < n; i++)
@@ -332,10 +333,11 @@ public class ParticleSpawner : MonoBehaviour
         }
     }
 
-    // ----- Forces (parallel, predicted) -----
+    // ---- Forces (predicted) ----
     void ApplySPHForcesParallelPredicted(int n)
     {
         System.Array.Fill(_forceAccum, Vector2.zero);
+
         float h = smoothingRadius;
         if (useSpatialHash && (_hash == null || _hash.Count == 0))
             BuildSpatialHash(n, predictedPositions);
@@ -344,9 +346,11 @@ public class ParticleSpawner : MonoBehaviour
         {
             var goI = particles[i];
             if (goI == null) return;
+
             Vector2 pi = predictedPositions[i];
             float rho_i = densities[i];
             float P_i = pressures[i];
+
             Vector2Int cell = useSpatialHash ? WorldToCell(pi) : default;
             IEnumerable<int> neighborEnum = useSpatialHash ? EnumerateNeighborIndices(cell) : FullIndexEnum(n);
 
@@ -357,14 +361,14 @@ public class ParticleSpawner : MonoBehaviour
                 if (goJ == null) continue;
 
                 Vector2 pj = predictedPositions[j];
-                Vector2 delta = pi - pj;
-                float dist = delta.magnitude;
+                Vector2 d = pi - pj;
+                float dist = d.magnitude;
                 if (dist <= 0f || dist >= h) continue;
 
                 float rho_j = densities[j];
                 float P_j = pressures[j];
 
-                Vector2 dir = delta / dist;
+                Vector2 dir = d / dist;
                 float gradMag = _spikyGradConst * (h - dist) * (h - dist);
                 Vector2 gradW = gradMag * dir;
 
@@ -391,14 +395,10 @@ public class ParticleSpawner : MonoBehaviour
             rb.AddForce(_forceAccum[i], ForceMode2D.Force);
         }
 
-        // After computing _forceAccum for SPH:
-        if (useWallRepulsion)
-        {
-            ApplyWallRepulsion(n);
-        }
+        if (useWallRepulsion) ApplyWallRepulsion(n);
     }
 
-    // ----- Kernel constants -----
+    // ---- Kernels ----
     void PrecomputeKernelConstants()
     {
         float h = smoothingRadius;
@@ -407,87 +407,30 @@ public class ParticleSpawner : MonoBehaviour
         _viscLapConst = 20f / (3f * Mathf.PI * Mathf.Pow(h, 5));
     }
 
-    // ----- Utility / visuals / collision -----
-    void UpdateParticleArrays()
-    {
-        if (particles == null) return;
-        for (int i = 0; i < particles.Length; i++)
-        {
-            var go = particles[i];
-            if (go == null) continue;
-            particlePositions[i] = go.transform.position;
-            var rb = go.GetComponent<Rigidbody2D>();
-            if (rb != null) particleVelocities[i] = rb.linearVelocity;
-        }
-    }
-
-    void ApplyVelocityColorVisualization()
-    {
-        _colorFrameCounter = 0;
-        if (!enableVelocityColor || particles == null) return;
-        float maxSpeed = Mathf.Max(0.0001f, maxColorSpeed);
-        for (int i = 0; i < particles.Length; i++)
-        {
-            var go = particles[i];
-            if (go == null) continue;
-            var sr = go.GetComponent<SpriteRenderer>();
-            if (sr == null) continue;
-            float speed = particleVelocities[i].magnitude;
-            float t = Mathf.Clamp01(speed / maxSpeed);
-            sr.color = Color.Lerp(slowColor, fastColor, t);
-        }
-    }
-
-    void ResetVelocityColorsIfNeeded()
-    {
-        if (_colorFrameCounter != -1 && particles != null)
-        {
-            foreach (var go in particles)
-            {
-                if (go == null) continue;
-                var sr = go.GetComponent<SpriteRenderer>();
-                if (sr == null) continue;
-                sr.color = slowColor;
-            }
-            _colorFrameCounter = -1;
-        }
-    }
-
-    void ApplyParticleLayerSettings()
-    {
-        if (!disableParticleSelfCollision || _particleLayerIndex == -1) return;
-        Physics2D.IgnoreLayerCollision(_particleLayerIndex, _particleLayerIndex, true);
-        if (particles == null) return;
-        for (int i = 0; i < particles.Length; i++)
-            if (particles[i] != null) particles[i].layer = _particleLayerIndex;
-    }
-
+    // ---- Spawning ----
     void SpawnAllInsideContainer()
     {
         ContainerBuilder cb = FindFirstObjectByType<ContainerBuilder>();
+        Vector2 center = cb ? (Vector2)cb.transform.position : Vector2.zero;
 
         float minX, maxX, minY, maxY;
         if (cb != null && !spawnOnFrameEdges)
             cb.GetCentralSpawnBounds(out minX, out maxX, out minY, out maxY);
         else if (cb != null && spawnOnFrameEdges)
         {
-            // Use full frame extents
-            float hw = cb.GetClampHalfExtents().x;
-            float hh = cb.GetClampHalfExtents().y;
-            minX = -hw; maxX = hw;
-            minY = -hh; maxY = hh;
+            Vector2 half = cb.GetClampHalfExtents();
+            minX = -half.x; maxX = half.x;
+            minY = -half.y; maxY = half.y;
         }
         else
         {
-            float halfW = 3f;
-            float halfH = 2f;
+            float halfW = 3f, halfH = 2f;
             minX = -halfW * 0.5f; maxX = halfW * 0.5f;
             minY = -halfH * 0.5f; maxY = halfH * 0.5f;
         }
 
         float radius = particleDiameter * 0.5f;
 
-        // When spawning on edges: tighten so centers lie on frame line
         if (!spawnOnFrameEdges)
         {
             minX += radius + placementMargin;
@@ -505,30 +448,22 @@ public class ParticleSpawner : MonoBehaviour
 
         if (spawnOnFrameEdges)
         {
-            // Distribute particles along perimeter
             float widthSpan = maxX - minX;
             float heightSpan = maxY - minY;
             float perimeter = 2f * (widthSpan + heightSpan);
             float spacing = Mathf.Max(radius * 2f, perimeter / spawnCount);
             int created = 0;
-            float halfW = widthSpan * 0.5f;
-            float halfH = heightSpan * 0.5f;
-            // Loop edges until fill
+
             while (created < spawnCount)
             {
-                // Param along perimeter
                 float s = (created * spacing) % perimeter;
-                Vector2 pos;
-                if (s < widthSpan) // bottom edge left->right
-                    pos = new Vector2(minX + s, minY);
-                else if (s < widthSpan + heightSpan) // right edge bottom->top
-                    pos = new Vector2(maxX, minY + (s - widthSpan));
-                else if (s < widthSpan + heightSpan + widthSpan) // top edge right->left
-                    pos = new Vector2(maxX - (s - widthSpan - heightSpan), maxY);
-                else // left edge top->bottom
-                    pos = new Vector2(minX, maxY - (s - widthSpan - heightSpan - widthSpan));
+                Vector2 local;
+                if (s < widthSpan) local = new Vector2(minX + s, minY);
+                else if (s < widthSpan + heightSpan) local = new Vector2(maxX, minY + (s - widthSpan));
+                else if (s < widthSpan + heightSpan + widthSpan) local = new Vector2(maxX - (s - widthSpan - heightSpan), maxY);
+                else local = new Vector2(minX, maxY - (s - widthSpan - heightSpan - widthSpan));
 
-                CreateFluidParticle(created, pos);
+                CreateFluidParticle(created, center + local);
                 created++;
             }
         }
@@ -540,9 +475,7 @@ public class ParticleSpawner : MonoBehaviour
                 bool found = false;
                 for (int attempt = 0; attempt < maxPlacementAttemptsPerParticle; attempt++)
                 {
-                    float x = Random.Range(minX, maxX);
-                    float y = Random.Range(minY, maxY);
-                    Vector2 cand = new Vector2(x, y);
+                    Vector2 cand = new Vector2(Random.Range(minX, maxX), Random.Range(minY, maxY));
                     bool overlaps = false;
                     float minDistSqr = (2f * radius) * (2f * radius);
                     for (int j = 0; j < placed.Count; j++)
@@ -551,7 +484,7 @@ public class ParticleSpawner : MonoBehaviour
                 }
                 if (!found) chosen = new Vector2(Random.Range(minX, maxX), Random.Range(minY, maxY));
                 placed.Add(chosen);
-                CreateFluidParticle(i, chosen);
+                CreateFluidParticle(i, center + chosen);
             }
         }
 
@@ -586,36 +519,7 @@ public class ParticleSpawner : MonoBehaviour
         pressures[index] = 0f;
     }
 
-    // Ghost boundary particles (not Rigidbody2D). They only appear in SPH neighbor queries.
-    void GenerateGhostBoundaryParticles()
-    {
-        var cb = FindFirstObjectByType<ContainerBuilder>();
-        if (cb == null) { ghostPositions = null; ghostCount = 0; return; }
-
-        float hw = cb.GetClampHalfExtents().x;
-        float hh = cb.GetClampHalfExtents().y;
-        float spacing = Mathf.Max(ghostSpacing, smoothingRadius * 0.5f);
-
-        List<Vector2> list = new List<Vector2>();
-
-        // Bottom & Top
-        for (float x = -hw; x <= hw + 0.0001f; x += spacing)
-        {
-            list.Add(new Vector2(x, -hh));
-            list.Add(new Vector2(x, hh));
-        }
-        // Left & Right
-        for (float y = -hh + spacing; y <= hh - spacing + 0.0001f; y += spacing)
-        {
-            list.Add(new Vector2(-hw, y));
-            list.Add(new Vector2(hw, y));
-        }
-
-        ghostCount = list.Count;
-        ghostPositions = list.ToArray();
-    }
-
-    // Wall repulsion (soft) – call before AddForce loop
+    // ---- Boundary helpers ----
     void ApplyWallRepulsion(int n)
     {
         if (!useWallRepulsion) return;
@@ -625,14 +529,14 @@ public class ParticleSpawner : MonoBehaviour
         Vector2 center = cb.transform.position;
         Vector2 half = cb.GetClampHalfExtents();
         float r = wallRepulsionDistance;
+
         for (int i = 0; i < n; i++)
         {
             var rb = particles[i]?.GetComponent<Rigidbody2D>();
             if (rb == null) continue;
-            Vector2 local = rb.position - center;
 
+            Vector2 local = rb.position - center;
             Vector2 force = Vector2.zero;
-            float pad = particleDiameter * 0.5f;
 
             float dx = half.x - Mathf.Abs(local.x);
             if (dx < r)
@@ -640,6 +544,7 @@ public class ParticleSpawner : MonoBehaviour
                 float sign = Mathf.Sign(local.x);
                 force.x += wallRepulsionStrength * (1f - dx / r) * -sign;
             }
+
             float dy = half.y - Mathf.Abs(local.y);
             if (dy < r)
             {
@@ -652,17 +557,59 @@ public class ParticleSpawner : MonoBehaviour
         }
     }
 
-    void SetColliderBounce(CircleCollider2D col, float b)
+    // ---- Utility / visuals / collision ----
+    void UpdateParticleArrays()
     {
-        PhysicsMaterial2D mat = col.sharedMaterial;
-        bool needNew = mat == null || !mat.name.Contains("runtime");
-        if (needNew)
+        if (particles == null) return;
+        for (int i = 0; i < particles.Length; i++)
         {
-            mat = new PhysicsMaterial2D("runtime_dynMat");
-            mat.friction = 0.4f;
+            var go = particles[i];
+            if (go == null) continue;
+            particlePositions[i] = go.transform.position;
+            var rb = go.GetComponent<Rigidbody2D>();
+            if (rb != null) particleVelocities[i] = rb.linearVelocity;
         }
-        mat.bounciness = Mathf.Clamp01(b);
-        col.sharedMaterial = mat;
+    }
+
+    void ApplyVelocityColorVisualization()
+    {
+        _colorFrameCounter = 0;
+        if (!enableVelocityColor || particles == null) return;
+        float maxSpeed = Mathf.Max(0.0001f, maxColorSpeed);
+        for (int i = 0; i < particles.Length; i++)
+        {
+            var go = particles[i];
+            if (go == null) continue;
+            var sr = go.GetComponent<SpriteRenderer>();
+            if (sr == null) continue;
+            float speed = particleVelocities[i].magnitude;
+            float t = Mathf.Clamp01(speed / maxSpeed);
+            sr.color = velocityGradient.Evaluate(t);
+        }
+    }
+
+    void ResetVelocityColorsIfNeeded()
+    {
+        if (_colorFrameCounter != -1 && particles != null)
+        {
+            foreach (var go in particles)
+            {
+                if (go == null) continue;
+                var sr = go.GetComponent<SpriteRenderer>();
+                if (sr == null) continue;
+                sr.color = velocityGradient.Evaluate(0f); // blue (idle)
+            }
+            _colorFrameCounter = -1;
+        }
+    }
+
+    void ApplyParticleLayerSettings()
+    {
+        if (!disableParticleSelfCollision || _particleLayerIndex == -1) return;
+        Physics2D.IgnoreLayerCollision(_particleLayerIndex, _particleLayerIndex, true);
+        if (particles == null) return;
+        for (int i = 0; i < particles.Length; i++)
+            if (particles[i] != null) particles[i].layer = _particleLayerIndex;
     }
 
     void OnValidate()
@@ -672,16 +619,28 @@ public class ParticleSpawner : MonoBehaviour
             prevParticleDiameter = particleDiameter;
             prevBounce = bounce;
             prevDamping = damping;
-            prevPlacementMargin = placementMargin;
             ApplyAllToExistingParticles();
         }
         else if (!enableVelocityColor)
+        {
             ResetVelocityColorsIfNeeded();
+        }
 
         if (disableParticleSelfCollision && _particleLayerIndex != -1)
             Physics2D.IgnoreLayerCollision(_particleLayerIndex, _particleLayerIndex, true);
         else if (!disableParticleSelfCollision && _particleLayerIndex != -1)
             Physics2D.IgnoreLayerCollision(_particleLayerIndex, _particleLayerIndex, false);
+    }
+
+    void SetColliderBounce(CircleCollider2D col, float b)
+    {
+        PhysicsMaterial2D mat = col.sharedMaterial;
+        if (mat == null || !mat.name.Contains("runtime"))
+        {
+            mat = new PhysicsMaterial2D("runtime_dynMat") { friction = 0.4f };
+        }
+        mat.bounciness = Mathf.Clamp01(b);
+        col.sharedMaterial = mat;
     }
 
     void CreateCircleSprite()
@@ -711,9 +670,7 @@ public class ParticleSpawner : MonoBehaviour
         p.transform.localScale = new Vector3(particleDiameter, particleDiameter, 1f);
         var col = p.AddComponent<CircleCollider2D>();
         col.radius = 0.5f;
-        var mat = new PhysicsMaterial2D("dynMat");
-        mat.bounciness = Mathf.Clamp01(bounce);
-        mat.friction = 0.4f;
+        var mat = new PhysicsMaterial2D("dynMat") { bounciness = Mathf.Clamp01(bounce), friction = 0.4f };
         col.sharedMaterial = mat;
         var rb = p.AddComponent<Rigidbody2D>();
         rb.gravityScale = 1f;
@@ -733,6 +690,7 @@ public class ParticleSpawner : MonoBehaviour
         float h = smoothingRadius;
         float h2 = h * h;
         float sum = 0f;
+
         for (int i = 0; i < n; i++)
         {
             Vector2 pi = particlePositions[i];
@@ -750,13 +708,13 @@ public class ParticleSpawner : MonoBehaviour
         return n > 0 ? sum / n : restDensity;
     }
 
-    // Use frame inner bounds for manual AABB constraint.
+    // ---- Box constraint (matches frame) ----
     void ConstrainParticlesToBox()
     {
         var cb = FindFirstObjectByType<ContainerBuilder>();
         if (cb == null || particles == null) return;
 
-        Vector2 containerCenter = cb.transform.position; // Add this
+        Vector2 center = cb.transform.position;
         Vector2 half = cb.GetClampHalfExtents() - Vector2.one * (particleDiameter * 0.5f);
 
         for (int i = 0; i < particles.Length; i++)
@@ -766,33 +724,34 @@ public class ParticleSpawner : MonoBehaviour
             var rb = go.GetComponent<Rigidbody2D>();
             if (rb == null) continue;
 
-            Vector2 pos = rb.position;
-            Vector2 localPos = pos - containerCenter; // Make relative to container
+            Vector2 local = rb.position - center;
             Vector2 vel = rb.linearVelocity;
-            bool changed = false;
+            bool hit = false;
 
-            if (Mathf.Abs(localPos.x) > half.x)
+            if (Mathf.Abs(local.x) > half.x)
             {
-                localPos.x = half.x * Mathf.Sign(localPos.x);
+                local.x = half.x * Mathf.Sign(local.x);
                 vel.x = -vel.x * boundsBounceFactor;
-                changed = true;
+                hit = true;
             }
-            if (Mathf.Abs(localPos.y) > half.y)
+            if (Mathf.Abs(local.y) > half.y)
             {
-                localPos.y = half.y * Mathf.Sign(localPos.y);
+                local.y = half.y * Mathf.Sign(local.y);
                 vel.y = -vel.y * boundsBounceFactor;
-                changed = true;
+                hit = true;
             }
 
-            if (changed)
+            if (hit)
             {
-                rb.position = containerCenter + localPos; // Convert back to world space
+                rb.position = center + local;
                 rb.linearVelocity = vel;
                 particlePositions[i] = rb.position;
                 particleVelocities[i] = vel;
             }
         }
     }
+
+    // ---- Batch apply helpers ----
     void ApplyAllToExistingParticles()
     {
         ApplyScaleToExistingParticles();
@@ -800,7 +759,7 @@ public class ParticleSpawner : MonoBehaviour
         ApplyDampingToExistingParticles();
     }
 
-    void ApplyScaleToExistingParticles()
+void ApplyScaleToExistingParticles()
     {
         if (particles == null) return;
         for (int i = 0; i < particles.Length; i++)
@@ -818,8 +777,7 @@ public class ParticleSpawner : MonoBehaviour
         {
             var p = particles[i];
             if (p == null) continue;
-            var col = p.GetComponent<CircleCollider2D>();
-            if (col == null) col = p.AddComponent<CircleCollider2D>();
+            var col = p.GetComponent<CircleCollider2D>() ?? p.AddComponent<CircleCollider2D>();
             SetColliderBounce(col, bounce);
         }
     }
@@ -842,4 +800,180 @@ public class ParticleSpawner : MonoBehaviour
 #endif
         }
     }
+
+    void UpdatePauseState()
+    {
+        if (paused)
+        {
+            if (!_wasPaused)
+            {
+                Physics2D.simulationMode = SimulationMode2D.Script; // stop gravity & collisions advancing
+                _wasPaused = true;
+            }
+        }
+        else
+        {
+            if (_wasPaused)
+            {
+                Physics2D.simulationMode = SimulationMode2D.FixedUpdate;
+                _wasPaused = false;
+            }
+        }
+    }
+
+    void TryStepWhilePaused()
+    {
+        if (!paused || !_stepRequested) return;
+        // Run one simulation tick manually
+        SPHStep();
+        ApplyMouseForces();
+        if (useAABBBounds) ConstrainParticlesToBox();
+        Physics2D.Simulate(Time.fixedDeltaTime);
+        _stepRequested = false;
+    }
+
+    void HandlePauseInput()
+    {
+#if ENABLE_INPUT_SYSTEM
+        var kb = Keyboard.current;
+        if (kb == null) return;
+        var pauseKey = GetKeyControl(togglePauseKey);
+        if (pauseKey != null && pauseKey.wasPressedThisFrame) paused = !paused;
+        if (paused)
+        {
+            var stepKeyCtrl = GetKeyControl(stepKey);
+            if (stepKeyCtrl != null && stepKeyCtrl.wasPressedThisFrame) _stepRequested = true;
+        }
+#else
+        if (Input.GetKeyDown(togglePauseKey)) paused = !paused;
+        if (paused && Input.GetKeyDown(stepKey)) _stepRequested = true;
+#endif
+    }
+
+    void CaptureMouseInput()
+    {
+        if (!enableMouseForces) { _mouseAttract = _mouseRepel = false; return; }
+        var cam = Camera.main;
+        if (cam == null) return;
+#if ENABLE_INPUT_SYSTEM
+        if (Mouse.current == null) { _mouseAttract = _mouseRepel = false; return; }
+        Vector2 sp = Mouse.current.position.ReadValue();
+        var mp = new Vector3(sp.x, sp.y, -cam.transform.position.z);
+        _mouseWorld = cam.ScreenToWorldPoint(mp);
+        _mouseAttract = Mouse.current.leftButton.isPressed;
+        _mouseRepel   = Mouse.current.rightButton.isPressed;
+#else
+        Vector3 mp = Input.mousePosition;
+        mp.z = -cam.transform.position.z;
+        _mouseWorld = cam.ScreenToWorldPoint(mp);
+        _mouseAttract = Input.GetMouseButton(0);
+        _mouseRepel   = Input.GetMouseButton(1);
+#endif
+    }
+
+#if ENABLE_INPUT_SYSTEM
+    KeyControl GetKeyControl(KeyCode code)
+    {
+        var kb = Keyboard.current;
+        if (kb == null) return null;
+        switch (code)
+        {
+            case KeyCode.Space: return kb.spaceKey;
+            case KeyCode.F:     return kb.fKey;
+            case KeyCode.LeftArrow:  return kb.leftArrowKey;
+            case KeyCode.RightArrow: return kb.rightArrowKey;
+            case KeyCode.UpArrow:    return kb.upArrowKey;
+            case KeyCode.DownArrow:  return kb.downArrowKey;
+            case KeyCode.Escape:     return kb.escapeKey;
+            case KeyCode.Return:     return kb.enterKey;
+            case KeyCode.Tab:        return kb.tabKey;
+            // Extend as needed
+            default: return null;
+        }
+    }
+#endif
+
+    void ApplyMouseForces()
+    {
+        if (!enableMouseForces || (!(_mouseAttract || _mouseRepel)) || particles == null) return;
+
+        if (mouseLiftOnly)
+        {
+            float rMax = mouseLiftRadius;
+            float rMax2 = rMax * rMax;
+            for (int i = 0; i < particles.Length; i++)
+            {
+                var rb = particles[i]?.GetComponent<Rigidbody2D>();
+                if (rb == null) continue;
+
+                Vector2 to = _mouseWorld - rb.position;
+                float d2 = to.sqrMagnitude;
+                if (d2 > rMax2) continue;
+
+                float d = Mathf.Sqrt(d2);
+                float t = d / Mathf.Max(rMax, 0.0001f);
+                float fall = mouseLiftFalloff != null ? mouseLiftFalloff.Evaluate(t) : (1f - t);
+
+                // Pure upward lift
+                Vector2 force = Vector2.up * (mouseLiftStrength * fall);
+                rb.AddForce(force, ForceMode2D.Force);
+            }
+            return;
+        }
+
+        // Original radial behavior (kept if mouseLiftOnly = false)
+        float rMaxRadial = mouseForceRadius;
+        float rMax2Radial = rMaxRadial * rMaxRadial;
+        float attract = _mouseAttract ? attractionStrength : 0f;
+        float repel = _mouseRepel ? repulsionStrength : 0f;
+
+        for (int i = 0; i < particles.Length; i++)
+        {
+            var rb = particles[i]?.GetComponent<Rigidbody2D>();
+            if (rb == null) continue;
+
+            Vector2 to = _mouseWorld - rb.position;
+            float d2 = to.sqrMagnitude;
+            if (d2 > rMax2Radial || d2 <= 1e-8f) continue;
+
+            float d = Mathf.Sqrt(d2);
+            float t = d / rMaxRadial;
+            float fall = forceFalloff != null ? forceFalloff.Evaluate(t) : (1f - t);
+            Vector2 dir = to / d;
+
+            Vector2 force = Vector2.zero;
+            if (attract > 0f) force += dir * (attract * fall);
+            if (repel > 0f) force -= dir * (repel * fall);
+            rb.AddForce(force, ForceMode2D.Force);
+        }
+    }
+
+    void RemoveLegacyWallColliders()
+    {
+        var cb = FindFirstObjectByType<ContainerBuilder>();
+        if (cb == null) return;
+        var children = cb.GetComponentsInChildren<Transform>(true);
+        foreach (var t in children)
+        {
+            if (t == cb.transform) continue;
+            if (t.name == "WallFrame") continue;
+            var bc2d = t.GetComponent<Collider2D>();
+            if (bc2d != null)
+            {
+                Destroy(bc2d);
+            }
+        }
+    }
+
+    #if UNITY_EDITOR
+    void OnDrawGizmosSelected()
+    {
+        var cb = FindFirstObjectByType<ContainerBuilder>();
+        if (cb == null) return;
+        Vector2 half = cb.GetClampHalfExtents() - Vector2.one * (particleDiameter * 0.5f);
+        Gizmos.color = Color.green;
+        Vector3 c = cb.transform.position;
+        Gizmos.DrawWireCube(c, new Vector3(half.x * 2f, half.y * 2f, 0.01f));
+    }
+    #endif
 }

@@ -16,17 +16,12 @@ public class ContainerBuilder : MonoBehaviour
     [Header("Frame (visual only)")]
     public bool showFrame = true;
     public Color frameColor = Color.black;
-    public float frameLineWidth = 0.06f;      // no effect on bounds
+    public float frameLineWidth = 0.06f;
     public int frameSortingOrder = 10;
 
     [Header("Spawn Region")]
     [Range(0.05f, 0.95f)]
     public float spawnAreaFraction = 0.5f;
-
-    [Header("Boundary Ghost Particles")]
-    public bool generateGhostParticles = true;
-    public float ghostSpacing = 0.25f;           // approximate spacing along edges
-    public int ghostLayerOrder = -1;             // optional separate layer (or keep default)
 
     Camera _cam;
     float _curWidth;
@@ -56,19 +51,31 @@ public class ContainerBuilder : MonoBehaviour
         }
     }
 
+    public System.Action OnSizeChanged; // notify listeners (ParticleSpawner) when frame size actually changes
+    public bool instantResize = false;  // optional: jump to new size immediately
+
     void Update()
     {
-        if (!Mathf.Approximately(_curWidth, width) || !Mathf.Approximately(_curHeight, height))
+        float prevW = _curWidth;
+        float prevH = _curHeight;
+
+        if (instantResize)
         {
-            float t = 1f - Mathf.Exp(-transitionSpeed * Time.deltaTime);
-            _curWidth = Mathf.Lerp(_curWidth, width, t);
-            _curHeight = Mathf.Lerp(_curHeight, height, t);
-            UpdateFrame();
-            FitCameraSmooth(t);
+            _curWidth = width;
+            _curHeight = height;
         }
         else
         {
-            FitCameraSmooth(1f - Mathf.Exp(-transitionSpeed * Time.deltaTime));
+            // Linear move (no asymptotic stall)
+            _curWidth = Mathf.MoveTowards(_curWidth, width, transitionSpeed * Time.deltaTime);
+            _curHeight = Mathf.MoveTowards(_curHeight, height, transitionSpeed * Time.deltaTime);
+        }
+
+        if (!Mathf.Approximately(prevW, _curWidth) || !Mathf.Approximately(prevH, _curHeight))
+        {
+            UpdateFrame();
+            FitCameraImmediate(); // keep camera in sync for large changes
+            OnSizeChanged?.Invoke();
         }
     }
 
@@ -93,6 +100,7 @@ public class ContainerBuilder : MonoBehaviour
     {
         EnsureFrame();
         if (_lr == null) return;
+
         _frameGO.SetActive(showFrame);
         if (!showFrame) return;
 
@@ -114,6 +122,7 @@ public class ContainerBuilder : MonoBehaviour
     {
         if (_cam == null) _cam = Camera.main;
         if (_cam == null) return;
+
         _cam.orthographic = true;
         float halfHNeeded = _curHeight / 2f + cameraMargin;
         float halfHFromWidth = (_curWidth / 2f) / Mathf.Max(_cam.aspect, 0.0001f) + cameraMargin;
@@ -126,10 +135,12 @@ public class ContainerBuilder : MonoBehaviour
     {
         if (_cam == null) _cam = Camera.main;
         if (_cam == null) return;
+
         float halfHNeeded = _curHeight / 2f + cameraMargin;
         float halfHFromWidth = (_curWidth / 2f) / Mathf.Max(_cam.aspect, 0.0001f) + cameraMargin;
         float targetSize = Mathf.Max(halfHNeeded, halfHFromWidth);
         _cam.orthographicSize = Mathf.Lerp(_cam.orthographicSize, targetSize, t);
+
         Vector3 targetPos = new Vector3(transform.position.x, transform.position.y, _cam.transform.position.z);
         _cam.transform.position = Vector3.Lerp(_cam.transform.position, targetPos, t);
     }
@@ -142,32 +153,38 @@ public class ContainerBuilder : MonoBehaviour
         FitCameraImmediate();
     }
 
-    // Bounds used by particles (no thickness subtraction)
-    public Vector2 GetClampHalfExtents() => new Vector2(_curWidth * 0.5f, _curHeight * 0.5f);
-    public Vector2 GetCurrentSize() => new Vector2(_curWidth, _curHeight);
+    // Bounds helpers (world-scale aware)
+    public Vector2 GetClampHalfExtents()
+    {
+        Vector3 s = transform.lossyScale;
+        return new Vector2(_curWidth * 0.5f * s.x, _curHeight * 0.5f * s.y);
+    }
+
+    public Vector2 GetCurrentSize()
+    {
+        Vector3 s = transform.lossyScale;
+        return new Vector2(_curWidth * s.x, _curHeight * s.y);
+    }
 
     public void GetCentralSpawnBounds(out float minX, out float maxX, out float minY, out float maxY)
     {
-        float frac = Mathf.Clamp(spawnAreaFraction, 0.05f, 0.95f);
-        float w = _curWidth * frac;
-        float h = _curHeight * frac;
-        minX = -w * 0.5f;
-        maxX =  w * 0.5f;
-        minY = -h * 0.5f;
-        maxY =  h * 0.5f;
+        float f = Mathf.Clamp(spawnAreaFraction, 0.05f, 0.95f);
+        float w = _curWidth * f;
+        float h = _curHeight * f;
+        minX = -w * 0.5f; maxX = w * 0.5f;
+        minY = -h * 0.5f; maxY = h * 0.5f;
     }
 
-    // World-space corner helpers (clockwise)
-    public void GetFrameCorners(Vector3[] outCorners)
+    // World-space corners (clockwise)
+    public void GetFrameCorners(Vector3[] out4)
     {
-        if (outCorners == null || outCorners.Length < 4) return;
-        float hw = _curWidth * 0.5f;
-        float hh = _curHeight * 0.5f;
+        if (out4 == null || out4.Length < 4) return;
+        float hw = _curWidth * 0.5f, hh = _curHeight * 0.5f;
         Vector3 c = transform.position;
-        outCorners[0] = c + new Vector3(-hw, -hh, 0);
-        outCorners[1] = c + new Vector3(hw, -hh, 0);
-        outCorners[2] = c + new Vector3(hw, hh, 0);
-        outCorners[3] = c + new Vector3(-hw, hh, 0);
+        out4[0] = c + new Vector3(-hw, -hh, 0);
+        out4[1] = c + new Vector3(hw, -hh, 0);
+        out4[2] = c + new Vector3(hw, hh, 0);
+        out4[3] = c + new Vector3(-hw, hh, 0);
     }
 
     public float CurrentWidth => _curWidth;
