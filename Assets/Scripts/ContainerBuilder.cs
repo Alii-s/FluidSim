@@ -1,200 +1,175 @@
-// ...existing code...
+// Frame-only container without thickness offset. Frame line width is purely visual; clamp uses raw width/height.
+
 using UnityEngine;
 
 [ExecuteAlways]
 public class ContainerBuilder : MonoBehaviour
 {
+    [Header("Dimensions")]
     public float width = 6f;
     public float height = 3f;
-    public float wallThickness = 0.2f;
-    public Color wallColor = Color.white;
-    public float cameraMargin = 1f;
-
-    [Tooltip("Higher = faster transition")]
     public float transitionSpeed = 4f;
 
-    Sprite pixelSprite;
-    Camera cam;
+    [Header("Camera Fit")]
+    public float cameraMargin = 1f;
 
-    // runtime state (interpolated)
-    float currentWidth;
-    float currentHeight;
+    [Header("Frame (visual only)")]
+    public bool showFrame = true;
+    public Color frameColor = Color.black;
+    public float frameLineWidth = 0.06f;      // no effect on bounds
+    public int frameSortingOrder = 10;
 
-    GameObject leftWall;
-    GameObject rightWall;
-    GameObject bottomWall;
+    [Header("Spawn Region")]
+    [Range(0.05f, 0.95f)]
+    public float spawnAreaFraction = 0.5f;
+
+    [Header("Boundary Ghost Particles")]
+    public bool generateGhostParticles = true;
+    public float ghostSpacing = 0.25f;           // approximate spacing along edges
+    public int ghostLayerOrder = -1;             // optional separate layer (or keep default)
+
+    Camera _cam;
+    float _curWidth;
+    float _curHeight;
+
+    [SerializeField] GameObject _frameGO;
+    LineRenderer _lr;
 
     void Awake()
     {
-        CreatePixelSprite();
-
-        // remove any leftover wall objects to avoid duplicate editor+runtime copies
-        if (Application.isPlaying)
-        {
-            string[] baseNames = new[] { "LeftWall", "RightWall", "BottomWall" };
-            for (int i = transform.childCount - 1; i >= 0; i--)
-            {
-                var child = transform.GetChild(i).gameObject;
-                foreach (var bn in baseNames)
-                {
-                    if (child.name == bn || child.name == bn + "_runtime")
-                    {
-                        Destroy(child);
-                        break;
-                    }
-                }
-            }
-        }
-
-        EnsureWalls();
-        cam = Camera.main;
-        currentWidth = width;
-        currentHeight = height;
-        ApplyImmediate(); // set initial shape
-    }
-
-    void Start()
-    {
-        // ensure camera properties at start
-        if (cam == null) cam = Camera.main;
-        if (cam != null) cam.orthographic = true;
-    }
-
-    void Update()
-    {
-        // smooth towards target inspector values
-        if (!Mathf.Approximately(currentWidth, width) || !Mathf.Approximately(currentHeight, height))
-        {
-            float t = 1f - Mathf.Exp(-transitionSpeed * Time.deltaTime); // smooth exponential lerp
-            currentWidth = Mathf.Lerp(currentWidth, width, t);
-            currentHeight = Mathf.Lerp(currentHeight, height, t);
-            UpdateWallsTransform();
-        }
-
-        // smooth camera fit
-        if (cam == null) cam = Camera.main;
-        if (cam != null)
-        {
-            float requiredHalfHeight = currentHeight / 2f + cameraMargin;
-            float requiredHalfHeightFromWidth = (currentWidth / 2f) / Mathf.Max(cam.aspect, 0.0001f) + cameraMargin;
-            float targetSize = Mathf.Max(requiredHalfHeight, requiredHalfHeightFromWidth);
-            // lerp camera size smoothly
-            cam.orthographicSize = Mathf.Lerp(cam.orthographicSize, targetSize, 1f - Mathf.Exp(-transitionSpeed * Time.deltaTime));
-            // keep camera centered on this object
-            Vector3 targetCamPos = new Vector3(transform.position.x, transform.position.y, cam.transform.position.z);
-            cam.transform.position = Vector3.Lerp(cam.transform.position, targetCamPos, 1f - Mathf.Exp(-transitionSpeed * Time.deltaTime));
-            cam.backgroundColor = new Color(0.92f, 0.95f, 0.98f);
-        }
-    }
-
-    void CreatePixelSprite()
-    {
-        if (pixelSprite != null) return;
-        Texture2D pixelTex = new Texture2D(1, 1);
-        pixelTex.SetPixel(0, 0, Color.white);
-        pixelTex.Apply();
-        pixelSprite = Sprite.Create(pixelTex, new Rect(0, 0, 1, 1), new Vector2(0.5f, 0.5f), 1f);
-    }
-
-    void EnsureWalls()
-    {
-        if (leftWall == null) leftWall = CreateWall("LeftWall");
-        if (rightWall == null) rightWall = CreateWall("RightWall");
-        if (bottomWall == null) bottomWall = CreateWall("BottomWall");
-        UpdateWallsTransform();
-    }
-
-    GameObject CreateWall(string name)
-    {
-        // create editor walls with plain name, runtime walls with "_runtime" suffix
-        string actualName = name + (Application.isPlaying ? "_runtime" : "");
-
-        // return existing if present
-        var found = transform.Find(actualName);
-        if (found != null) return found.gameObject;
-
-        // when editing, prefer reusing an editor-created child with the plain name
-        if (!Application.isPlaying)
-        {
-            var editorFound = transform.Find(name);
-            if (editorFound != null) return editorFound.gameObject;
-        }
-
-        var g = new GameObject(actualName);
-        g.transform.parent = transform;
-        g.transform.localRotation = Quaternion.identity;
-
-        var sr = g.AddComponent<SpriteRenderer>();
-        sr.sprite = pixelSprite;
-        sr.color = wallColor;
-
-        var col = g.AddComponent<BoxCollider2D>();
-        col.size = Vector2.one; // transform scale controls actual world size
-
-        // Add a kinematic Rigidbody2D so the physics engine treats wall movements/scale changes correctly
-        var rb = g.AddComponent<Rigidbody2D>();
-        rb.bodyType = RigidbodyType2D.Kinematic;
-        rb.simulated = true;
-        rb.interpolation = RigidbodyInterpolation2D.Interpolate;
-
-        return g;
-    }
-
-    void UpdateWallsTransform()
-    {
-        if (leftWall == null || rightWall == null || bottomWall == null) return;
-
-        // left
-        Vector2 leftPos = new Vector2(-currentWidth / 2f - wallThickness / 2f, 0f);
-        Vector3 leftScale = new Vector3(wallThickness, currentHeight + wallThickness, 1f);
-        leftWall.transform.localPosition = leftPos;
-        leftWall.transform.localScale = leftScale;
-        leftWall.GetComponent<SpriteRenderer>().color = wallColor;
-
-        // right
-        Vector2 rightPos = new Vector2(currentWidth / 2f + wallThickness / 2f, 0f);
-        Vector3 rightScale = leftScale;
-        rightWall.transform.localPosition = rightPos;
-        rightWall.transform.localScale = rightScale;
-        rightWall.GetComponent<SpriteRenderer>().color = wallColor;
-
-        // bottom
-        Vector2 bottomPos = new Vector2(0f, -currentHeight / 2f - wallThickness / 2f);
-        Vector3 bottomScale = new Vector3(currentWidth + wallThickness * 2f, wallThickness, 1f);
-        bottomWall.transform.localPosition = bottomPos;
-        bottomWall.transform.localScale = bottomScale;
-        bottomWall.GetComponent<SpriteRenderer>().color = wallColor;
-
-        // Ensure physics sees the transform changes immediately (reduces missed collisions)
-        Physics2D.SyncTransforms();
-    }
-
-    // instant apply (useful if you want immediate change)
-    public void ApplyImmediate()
-    {
-        currentWidth = width;
-        currentHeight = height;
-        UpdateWallsTransform();
-        if (cam == null) cam = Camera.main;
-        if (cam != null)
-        {
-            cam.orthographic = true;
-            float requiredHalfHeight = height / 2f + cameraMargin;
-            float requiredHalfHeightFromWidth = (width / 2f) / Mathf.Max(cam.aspect, 0.0001f) + cameraMargin;
-            cam.orthographicSize = Mathf.Max(requiredHalfHeight, requiredHalfHeightFromWidth);
-            cam.transform.position = new Vector3(transform.position.x, transform.position.y, -10f);
-            cam.backgroundColor = new Color(0.92f, 0.95f, 0.98f);
-        }
+        _curWidth = width;
+        _curHeight = height;
+        _cam = Camera.main;
+        EnsureFrame();
+        ApplyImmediate();
     }
 
     void OnValidate()
     {
-        CreatePixelSprite();
-        // create walls in editor when values change so you see immediate feedback
         if (!Application.isPlaying)
         {
-            EnsureWalls();
-            ApplyImmediate();
+            _curWidth = width;
+            _curHeight = height;
+            EnsureFrame();
+            UpdateFrame();
+            FitCameraImmediate();
         }
     }
+
+    void Update()
+    {
+        if (!Mathf.Approximately(_curWidth, width) || !Mathf.Approximately(_curHeight, height))
+        {
+            float t = 1f - Mathf.Exp(-transitionSpeed * Time.deltaTime);
+            _curWidth = Mathf.Lerp(_curWidth, width, t);
+            _curHeight = Mathf.Lerp(_curHeight, height, t);
+            UpdateFrame();
+            FitCameraSmooth(t);
+        }
+        else
+        {
+            FitCameraSmooth(1f - Mathf.Exp(-transitionSpeed * Time.deltaTime));
+        }
+    }
+
+    void EnsureFrame()
+    {
+        if (_frameGO == null)
+        {
+            _frameGO = new GameObject("WallFrame");
+            _frameGO.transform.SetParent(transform, false);
+            _lr = _frameGO.AddComponent<LineRenderer>();
+            _lr.useWorldSpace = false;
+            _lr.loop = true;
+            _lr.positionCount = 4;
+            _lr.material = new Material(Shader.Find("Sprites/Default"));
+            _lr.textureMode = LineTextureMode.Stretch;
+            _lr.sortingOrder = frameSortingOrder;
+        }
+        else if (_lr == null) _lr = _frameGO.GetComponent<LineRenderer>();
+    }
+
+    void UpdateFrame()
+    {
+        EnsureFrame();
+        if (_lr == null) return;
+        _frameGO.SetActive(showFrame);
+        if (!showFrame) return;
+
+        float hw = _curWidth * 0.5f;
+        float hh = _curHeight * 0.5f;
+
+        _lr.startColor = frameColor;
+        _lr.endColor = frameColor;
+        _lr.startWidth = frameLineWidth;
+        _lr.endWidth = frameLineWidth;
+
+        _lr.SetPosition(0, new Vector3(-hw, -hh, 0));
+        _lr.SetPosition(1, new Vector3(hw, -hh, 0));
+        _lr.SetPosition(2, new Vector3(hw, hh, 0));
+        _lr.SetPosition(3, new Vector3(-hw, hh, 0));
+    }
+
+    void FitCameraImmediate()
+    {
+        if (_cam == null) _cam = Camera.main;
+        if (_cam == null) return;
+        _cam.orthographic = true;
+        float halfHNeeded = _curHeight / 2f + cameraMargin;
+        float halfHFromWidth = (_curWidth / 2f) / Mathf.Max(_cam.aspect, 0.0001f) + cameraMargin;
+        _cam.orthographicSize = Mathf.Max(halfHNeeded, halfHFromWidth);
+        _cam.transform.position = new Vector3(transform.position.x, transform.position.y, -10f);
+        _cam.backgroundColor = new Color(0.92f, 0.95f, 0.98f);
+    }
+
+    void FitCameraSmooth(float t)
+    {
+        if (_cam == null) _cam = Camera.main;
+        if (_cam == null) return;
+        float halfHNeeded = _curHeight / 2f + cameraMargin;
+        float halfHFromWidth = (_curWidth / 2f) / Mathf.Max(_cam.aspect, 0.0001f) + cameraMargin;
+        float targetSize = Mathf.Max(halfHNeeded, halfHFromWidth);
+        _cam.orthographicSize = Mathf.Lerp(_cam.orthographicSize, targetSize, t);
+        Vector3 targetPos = new Vector3(transform.position.x, transform.position.y, _cam.transform.position.z);
+        _cam.transform.position = Vector3.Lerp(_cam.transform.position, targetPos, t);
+    }
+
+    public void ApplyImmediate()
+    {
+        _curWidth = width;
+        _curHeight = height;
+        UpdateFrame();
+        FitCameraImmediate();
+    }
+
+    // Bounds used by particles (no thickness subtraction)
+    public Vector2 GetClampHalfExtents() => new Vector2(_curWidth * 0.5f, _curHeight * 0.5f);
+    public Vector2 GetCurrentSize() => new Vector2(_curWidth, _curHeight);
+
+    public void GetCentralSpawnBounds(out float minX, out float maxX, out float minY, out float maxY)
+    {
+        float frac = Mathf.Clamp(spawnAreaFraction, 0.05f, 0.95f);
+        float w = _curWidth * frac;
+        float h = _curHeight * frac;
+        minX = -w * 0.5f;
+        maxX =  w * 0.5f;
+        minY = -h * 0.5f;
+        maxY =  h * 0.5f;
+    }
+
+    // World-space corner helpers (clockwise)
+    public void GetFrameCorners(Vector3[] outCorners)
+    {
+        if (outCorners == null || outCorners.Length < 4) return;
+        float hw = _curWidth * 0.5f;
+        float hh = _curHeight * 0.5f;
+        Vector3 c = transform.position;
+        outCorners[0] = c + new Vector3(-hw, -hh, 0);
+        outCorners[1] = c + new Vector3(hw, -hh, 0);
+        outCorners[2] = c + new Vector3(hw, hh, 0);
+        outCorners[3] = c + new Vector3(-hw, hh, 0);
+    }
+
+    public float CurrentWidth => _curWidth;
+    public float CurrentHeight => _curHeight;
 }
