@@ -1430,15 +1430,15 @@ MonoBehaviour:
   boundsBounceFactor: 0
   useAABBBounds: 1
   spawnOnFrameEdges: 0
-  useWallRepulsion: 1
+  useWallRepulsion: 0
   wallRepulsionStrength: 40
   wallRepulsionDistance: 0.3
   paused: 0
   togglePauseKey: 32
   stepKey: 102
   enableMouseForces: 1
-  mouseForceRadius: 2
-  attractionStrength: 120
+  mouseForceRadius: 3
+  attractionStrength: 30
   repulsionStrength: 60
   forceFalloff:
     serializedVersion: 2
