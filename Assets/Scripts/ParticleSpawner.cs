@@ -73,6 +73,17 @@ public class ParticleSpawner : MonoBehaviour
     public float mouseLiftRadius = 1.2f;           // area of effect
     public AnimationCurve mouseLiftFalloff = AnimationCurve.EaseInOut(0,1,1,0);
 
+    [Header("Timestep / Substeps")]
+    public bool overrideFixedDelta = false;
+    public float customFixedDelta = 0.005f;   // smaller than default 0.02 for more updates
+    public int sphSubsteps = 1;               // >1 = internal SPH substeps
+
+    [Header("Cohesion / Surface Tension")]
+    public bool enableCohesion = true;
+    public float cohesionStrength = 2f;      // tune (start 1–5)
+    [Range(0f,1f)] public float cohesionMinQ = 0.35f; // start of attraction band (just outside strong repulsion)
+    [Range(0f,1f)] public float cohesionMaxQ = 0.85f; // end of attraction band
+
     // Hash
     Dictionary<Vector2Int, List<int>> _hash;
     float _cellSize;
@@ -119,6 +130,7 @@ public class ParticleSpawner : MonoBehaviour
     {
         currentGravity = gravity;
         Physics2D.gravity = currentGravity;
+        if (overrideFixedDelta) Time.fixedDeltaTime = customFixedDelta;
         CreateCircleSprite();
         if (particlePrefab == null)
             particlePrefab = CreateDefaultParticlePrefab();
@@ -183,15 +195,31 @@ public class ParticleSpawner : MonoBehaviour
 
     void FixedUpdate()
     {
-        if (paused) return; // physics disabled, skip SPH
-        SPHStep();
-        ApplyMouseForces();
-        if (useAABBBounds) ConstrainParticlesToBox();
-        // physics will run automatically when not paused
+        if (overrideFixedDelta && !Mathf.Approximately(Time.fixedDeltaTime, customFixedDelta))
+            Time.fixedDeltaTime = customFixedDelta;
+
+        if (paused) return;
+
+        int steps = Mathf.Max(1, sphSubsteps);
+        float dt = Time.fixedDeltaTime / steps;
+
+        // If doing substeps, temporarily control physics manually
+        bool scripted = (steps > 1);
+        if (scripted) Physics2D.simulationMode = SimulationMode2D.Script;
+
+        for (int s = 0; s < steps; s++)
+        {
+            SPHStep(dt);
+            ApplyMouseForces();
+            if (useAABBBounds) ConstrainParticlesToBox();
+            if (scripted) Physics2D.Simulate(dt);
+        }
+
+        if (scripted) Physics2D.simulationMode = SimulationMode2D.FixedUpdate;
     }
 
     // ---- SPH core ----
-    void SPHStep()
+    void SPHStep(float dt)
     {
         if (particles == null) return;
         UpdateParticleArrays();
@@ -207,7 +235,6 @@ public class ParticleSpawner : MonoBehaviour
             for (int i = 0; i < n; i++) _locks[i] = new object();
         }
 
-        float dt = Time.fixedDeltaTime;
         PredictPositions(dt, n);
         if (useSpatialHash) BuildSpatialHash(n, predictedPositions);
         ComputeDensitiesParallelPredicted(n);
@@ -380,6 +407,22 @@ public class ParticleSpawner : MonoBehaviour
                 Vector2 fVisc = viscosity * particleMass * vij * lapW / Mathf.Max(rho_j, 1e-6f);
 
                 Vector2 fTotal = fPressure + fVisc;
+
+                // Cohesion (mid-range attraction)
+                if (enableCohesion)
+                {
+                    float q = dist / h;
+                    if (q >= cohesionMinQ && q <= cohesionMaxQ)
+                    {
+                        float bandT = (q - cohesionMinQ) / Mathf.Max(cohesionMaxQ - cohesionMinQ, 1e-6f);
+                        float falloff = 1f - bandT; // strongest near cohesionMinQ
+                        // Soften near outer edge (optional quadratic)
+                        falloff *= falloff;
+                        Vector2 fCohesion = -dir * (cohesionStrength * falloff);
+                        fTotal += fCohesion;
+                    }
+                }
+
                 float mag = fTotal.magnitude;
                 if (mag > maxForceClamp) fTotal *= (maxForceClamp / mag);
 
@@ -824,11 +867,11 @@ void ApplyScaleToExistingParticles()
     void TryStepWhilePaused()
     {
         if (!paused || !_stepRequested) return;
-        // Run one simulation tick manually
-        SPHStep();
+        float dt = (overrideFixedDelta ? customFixedDelta : Time.fixedDeltaTime);
+        SPHStep(dt);
         ApplyMouseForces();
         if (useAABBBounds) ConstrainParticlesToBox();
-        Physics2D.Simulate(Time.fixedDeltaTime);
+        Physics2D.Simulate(dt);
         _stepRequested = false;
     }
 

@@ -12,6 +12,8 @@ public class ContainerBuilder : MonoBehaviour
 
     [Header("Camera Fit")]
     public float cameraMargin = 1f;
+    public bool overrideCameraBackground = true;        // NEW
+    public Color cameraBackgroundColor = Color.gray;    // NEW
 
     [Header("Frame (visual only)")]
     public bool showFrame = true;
@@ -128,7 +130,9 @@ public class ContainerBuilder : MonoBehaviour
         float halfHFromWidth = (_curWidth / 2f) / Mathf.Max(_cam.aspect, 0.0001f) + cameraMargin;
         _cam.orthographicSize = Mathf.Max(halfHNeeded, halfHFromWidth);
         _cam.transform.position = new Vector3(transform.position.x, transform.position.y, -10f);
-        _cam.backgroundColor = new Color(0.92f, 0.95f, 0.98f);
+
+        if (overrideCameraBackground)
+            _cam.backgroundColor = cameraBackgroundColor;
     }
 
     void FitCameraSmooth(float t)
@@ -143,6 +147,9 @@ public class ContainerBuilder : MonoBehaviour
 
         Vector3 targetPos = new Vector3(transform.position.x, transform.position.y, _cam.transform.position.z);
         _cam.transform.position = Vector3.Lerp(_cam.transform.position, targetPos, t);
+
+        if (overrideCameraBackground)
+            _cam.backgroundColor = cameraBackgroundColor;
     }
 
     public void ApplyImmediate()
