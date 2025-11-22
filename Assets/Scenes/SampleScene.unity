@@ -576,7 +576,7 @@ Camera:
   m_Enabled: 1
   serializedVersion: 2
   m_ClearFlags: 2
-  m_BackGroundColor: {r: 0.92, g: 0.95, b: 0.98, a: 1}
+  m_BackGroundColor: {r: 0.014818445, g: 0.014818445, b: 0.084905684, a: 1}
   m_projectionMatrixMode: 1
   m_GateFitMode: 2
   m_FOVAxisMode: 0
@@ -601,7 +601,7 @@ Camera:
   far clip plane: 1000
   field of view: 34
   orthographic: 1
-  orthographic size: 5.5281253
+  orthographic size: 8.59375
   m_Depth: -1
   m_CullingMask:
     serializedVersion: 2
@@ -1314,10 +1314,12 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5bb610c05ffa54a4cbc164a74bce1ebb, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ContainerBuilder
-  width: 16.1
-  height: 8.33
+  width: 27
+  height: 13.73
   transitionSpeed: 4
   cameraMargin: 1
+  overrideCameraBackground: 1
+  cameraBackgroundColor: {r: 0.014818445, g: 0.014818445, b: 0.084905684, a: 1}
   showFrame: 1
   frameColor: {r: 1, g: 1, b: 1, a: 1}
   frameLineWidth: 0.06
@@ -1376,7 +1378,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ParticleSpawner
   particlePrefab: {fileID: 0}
-  spawnCount: 2000
+  spawnCount: 4000
   particleDiameter: 0.1
   bounce: 0.05
   damping: 1
@@ -1582,10 +1584,10 @@ LineRenderer:
   m_SortingLayer: 0
   m_SortingOrder: 10
   m_Positions:
-  - {x: -8.05, y: -4.165, z: 0}
-  - {x: 8.05, y: -4.165, z: 0}
-  - {x: 8.05, y: 4.165, z: 0}
-  - {x: -8.05, y: 4.165, z: 0}
+  - {x: -13.5, y: -6.865, z: 0}
+  - {x: 13.5, y: -6.865, z: 0}
+  - {x: 13.5, y: 6.865, z: 0}
+  - {x: -13.5, y: 6.865, z: 0}
   m_Parameters:
     serializedVersion: 3
     widthMultiplier: 1

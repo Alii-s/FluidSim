@@ -86,8 +86,14 @@ public class ParticleSpawner : MonoBehaviour
 
     // Hash
     Dictionary<Vector2Int, List<int>> _hash;
+    Vector2 _hashOrigin;                 // ADD (used by WorldToCell for dictionary hash)
+// Spatial grid (counting sort)
+    int _gridCols, _gridRows;
     float _cellSize;
-    Vector2 _hashOrigin;
+    Vector2 _gridOrigin;
+    int[] _cellStart;        // length = _gridCols*_gridRows + 1 (sentinel)
+    int[] _cellCounts;       // histogram
+    int[] _sortedIndices;    // particle indices grouped by cell
 
     // Data
     public GameObject[] particles;
@@ -125,6 +131,15 @@ public class ParticleSpawner : MonoBehaviour
 
     // track pause state transition
     bool _wasPaused; 
+
+    Rigidbody2D[] _rbCache;          // CACHE
+    SpriteRenderer[] _srCache;       // CACHE
+    static readonly Vector2Int[] _neighborOffsets = {
+        new Vector2Int(-1,-1), new Vector2Int(0,-1), new Vector2Int(1,-1),
+        new Vector2Int(-1, 0), new Vector2Int(0, 0), new Vector2Int(1, 0),
+        new Vector2Int(-1, 1), new Vector2Int(0, 1), new Vector2Int(1, 1)
+    };
+    bool _kernelsDirty = true;
 
     void Awake()
     {
@@ -285,11 +300,97 @@ public class ParticleSpawner : MonoBehaviour
         }
     }
 
+    void BuildSpatialGrid(int n, Vector2[] src)
+    {
+        _cellSize = smoothingRadius;
+
+        // Compute bounds
+        float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
+        for (int i = 0; i < n; i++)
+        {
+            var p = src[i];
+            if (p.x < minX) minX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y > maxY) maxY = p.y;
+        }
+        _gridOrigin = new Vector2(minX, minY) - Vector2.one * _cellSize;
+        Vector2 extents = new Vector2(maxX, maxY) - _gridOrigin + Vector2.one * _cellSize;
+        _gridCols = Mathf.Max(1, Mathf.CeilToInt(extents.x / _cellSize));
+        _gridRows = Mathf.Max(1, Mathf.CeilToInt(extents.y / _cellSize));
+        int cellTotal = _gridCols * _gridRows;
+
+        // Ensure arrays
+        if (_cellCounts == null || _cellCounts.Length != cellTotal)
+            _cellCounts = new int[cellTotal];
+        if (_cellStart == null || _cellStart.Length != cellTotal + 1)
+            _cellStart = new int[cellTotal + 1];
+        if (_sortedIndices == null || _sortedIndices.Length != n)
+            _sortedIndices = new int[n];
+
+        System.Array.Clear(_cellCounts, 0, cellTotal);
+
+        // Histogram counts
+        for (int i = 0; i < n; i++)
+        {
+            int key = PositionToCellKey(src[i]);
+            _cellCounts[key]++;
+        }
+
+        // Prefix sum -> starts
+        int running = 0;
+        for (int c = 0; c < cellTotal; c++)
+        {
+            _cellStart[c] = running;
+            running += _cellCounts[c];
+        }
+        _cellStart[cellTotal] = running; // sentinel
+
+        // Temp offsets (reuse _cellCounts)
+        System.Array.Copy(_cellStart, _cellCounts, cellTotal);
+
+        // Scatter particle indices into contiguous array
+        for (int i = 0; i < n; i++)
+        {
+            int key = PositionToCellKey(src[i]);
+            int dst = _cellCounts[key]++;
+            _sortedIndices[dst] = i;
+        }
+    }
+
+    int PositionToCellKey(Vector2 p)
+    {
+        int cx = Mathf.FloorToInt((p.x - _gridOrigin.x) / _cellSize);
+        int cy = Mathf.FloorToInt((p.y - _gridOrigin.y) / _cellSize);
+        cx = Mathf.Clamp(cx, 0, _gridCols - 1);
+        cy = Mathf.Clamp(cy, 0, _gridRows - 1);
+        return cy * _gridCols + cx;
+    }
+
+    void GetCellRange(int key, out int start, out int end)
+    {
+        // FIX: _cellCols -> _gridCols
+        if (_cellStart == null || key < 0 || key >= _gridCols * _gridRows)
+        {
+            start = end = 0;
+            return;
+        }
+        start = _cellStart[key];
+        end = _cellStart[key + 1];
+    }
+
     Vector2Int WorldToCell(Vector2 p)
     {
         int cx = Mathf.FloorToInt((p.x - _hashOrigin.x) / _cellSize);
         int cy = Mathf.FloorToInt((p.y - _hashOrigin.y) / _cellSize);
         return new Vector2Int(cx, cy);
+    }
+
+    Vector2Int WorldToCellCoords(Vector2 p)
+    {
+        int cx = Mathf.FloorToInt((p.x - _gridOrigin.x) / _cellSize);
+        int cy = Mathf.FloorToInt((p.y - _gridOrigin.y) / _cellSize);
+        return new Vector2Int(Mathf.Clamp(cx,0,_gridCols-1), Mathf.Clamp(cy,0,_gridRows-1));
     }
 
     IEnumerable<int> EnumerateNeighborIndices(Vector2Int cell)
@@ -325,27 +426,31 @@ public class ParticleSpawner : MonoBehaviour
 
             if (useSpatialHash)
             {
-                Vector2Int cell = WorldToCell(pi);
-                foreach (int j in EnumerateNeighborIndices(cell))
+                Vector2Int baseCell = WorldToCell(pi);
+                for (int o = 0; o < _neighborOffsets.Length; o++)
                 {
-                    float r2 = (pi - predictedPositions[j]).sqrMagnitude;
-                    if (r2 >= h2) continue;
-                    float term = h2 - r2;
-                    rho += particleMass * _poly6Const * term * term * term;
+                    Vector2Int c = baseCell + _neighborOffsets[o];
+                    if (_hash == null || !_hash.TryGetValue(c, out var list)) continue;
+                    for (int idx = 0; idx < list.Count; idx++)
+                    {
+                        int j = list[idx];
+                        float r2 = (pi - predictedPositions[j]).sqrMagnitude;
+                        if (r2 >= h2) continue;
+                        float term = h2 - r2;
+                        rho += particleMass * _poly6Const * term * term * term;
+                    }
                 }
             }
             else
             {
                 for (int j = 0; j < n; j++)
                 {
-                    if (particles[j] == null) continue;
                     float r2 = (pi - predictedPositions[j]).sqrMagnitude;
                     if (r2 >= h2) continue;
                     float term = h2 - r2;
                     rho += particleMass * _poly6Const * term * term * term;
                 }
             }
-
             densities[i] = Mathf.Max(rho, restDensity * 0.5f);
         });
     }
@@ -364,76 +469,134 @@ public class ParticleSpawner : MonoBehaviour
     void ApplySPHForcesParallelPredicted(int n)
     {
         System.Array.Fill(_forceAccum, Vector2.zero);
-
         float h = smoothingRadius;
+        float h2 = h * h;
         if (useSpatialHash && (_hash == null || _hash.Count == 0))
             BuildSpatialHash(n, predictedPositions);
 
-        Parallel.For(0, n, i =>
+        // Thread-local accumulators to remove locks
+        Vector2[][] threadForces = new Vector2[System.Environment.ProcessorCount][];
+        for (int t = 0; t < threadForces.Length; t++)
+            threadForces[t] = new Vector2[n];
+
+        Parallel.For(0, n, () => System.Threading.Thread.GetDomainID(), (i, state, threadId) =>
         {
             var goI = particles[i];
-            if (goI == null) return;
+            if (goI == null) return threadId;
 
             Vector2 pi = predictedPositions[i];
             float rho_i = densities[i];
             float P_i = pressures[i];
 
-            Vector2Int cell = useSpatialHash ? WorldToCell(pi) : default;
-            IEnumerable<int> neighborEnum = useSpatialHash ? EnumerateNeighborIndices(cell) : FullIndexEnum(n);
-
-            foreach (int j in neighborEnum)
+            if (useSpatialHash)
             {
-                if (j <= i) continue;
-                var goJ = particles[j];
-                if (goJ == null) continue;
-
-                Vector2 pj = predictedPositions[j];
-                Vector2 d = pi - pj;
-                float dist = d.magnitude;
-                if (dist <= 0f || dist >= h) continue;
-
-                float rho_j = densities[j];
-                float P_j = pressures[j];
-
-                Vector2 dir = d / dist;
-                float gradMag = _spikyGradConst * (h - dist) * (h - dist);
-                Vector2 gradW = gradMag * dir;
-
-                float pressureScalar = (P_i + P_j) / (2f * Mathf.Max(rho_i * rho_j, 1e-6f));
-                Vector2 fPressure = -particleMass * pressureScalar * gradW;
-
-                float lapW = _viscLapConst * (h - dist);
-                Vector2 vij = particleVelocities[j] - particleVelocities[i];
-                Vector2 fVisc = viscosity * particleMass * vij * lapW / Mathf.Max(rho_j, 1e-6f);
-
-                Vector2 fTotal = fPressure + fVisc;
-
-                // Cohesion (mid-range attraction)
-                if (enableCohesion)
+                Vector2Int baseCell = WorldToCell(pi);
+                for (int o = 0; o < _neighborOffsets.Length; o++)
                 {
-                    float q = dist / h;
-                    if (q >= cohesionMinQ && q <= cohesionMaxQ)
+                    Vector2Int c = baseCell + _neighborOffsets[o];
+                    if (_hash == null || !_hash.TryGetValue(c, out var list)) continue;
+                    for (int idx = 0; idx < list.Count; idx++)
                     {
-                        float bandT = (q - cohesionMinQ) / Mathf.Max(cohesionMaxQ - cohesionMinQ, 1e-6f);
-                        float falloff = 1f - bandT; // strongest near cohesionMinQ
-                        // Soften near outer edge (optional quadratic)
-                        falloff *= falloff;
-                        Vector2 fCohesion = -dir * (cohesionStrength * falloff);
-                        fTotal += fCohesion;
+                        int j = list[idx];
+                        if (j <= i || particles[j] == null) continue;
+                        Vector2 pj = predictedPositions[j];
+                        Vector2 d = pi - pj;
+                        float r2 = d.sqrMagnitude;
+                        if (r2 >= h2 || r2 <= 0f) continue;
+                        float dist = Mathf.Sqrt(r2);
+                        Vector2 dir = d / dist;
+
+                        float rho_j = densities[j];
+                        float P_j = pressures[j];
+
+                        float gradMag = _spikyGradConst * (h - dist) * (h - dist);
+                        Vector2 gradW = gradMag * dir;
+                        float pressureScalar = (P_i + P_j) / (2f * Mathf.Max(rho_i * rho_j, 1e-6f));
+                        Vector2 fPressure = -particleMass * pressureScalar * gradW;
+
+                        float lapW = _viscLapConst * (h - dist);
+                        Vector2 vij = particleVelocities[j] - particleVelocities[i];
+                        Vector2 fVisc = viscosity * particleMass * vij * lapW / Mathf.Max(rho_j, 1e-6f);
+
+                        Vector2 fTotal = fPressure + fVisc;
+
+                        if (enableCohesion)
+                        {
+                            float q = dist / h;
+                            if (q >= cohesionMinQ && q <= cohesionMaxQ)
+                            {
+                                float bandT = (q - cohesionMinQ) / Mathf.Max(cohesionMaxQ - cohesionMinQ, 1e-6f);
+                                float falloff = 1f - bandT;
+                                falloff *= falloff;
+                                fTotal += -dir * (cohesionStrength * falloff);
+                            }
+                        }
+
+                        float mag = fTotal.magnitude;
+                        if (mag > maxForceClamp) fTotal *= (maxForceClamp / mag);
+
+                        threadForces[threadId][i] += fTotal;
+                        threadForces[threadId][j] -= fTotal;
                     }
                 }
-
-                float mag = fTotal.magnitude;
-                if (mag > maxForceClamp) fTotal *= (maxForceClamp / mag);
-
-                _forceAccum[i] += fTotal;
-                lock (_locks[j]) { _forceAccum[j] -= fTotal; }
             }
-        });
+            else
+            {
+                for (int j = i + 1; j < n; j++)
+                {
+                    if (particles[j] == null) continue;
+                    Vector2 pj = predictedPositions[j];
+                    Vector2 d = pi - pj;
+                    float r2 = d.sqrMagnitude;
+                    if (r2 >= h2 || r2 <= 0f) continue;
+                    float dist = Mathf.Sqrt(r2);
+                    Vector2 dir = d / dist;
+
+                    float rho_j = densities[j];
+                    float P_j = pressures[j];
+
+                    float gradMag = _spikyGradConst * (h - dist) * (h - dist);
+                    Vector2 gradW = gradMag * dir;
+                    float pressureScalar = (P_i + P_j) / (2f * Mathf.Max(rho_i * rho_j, 1e-6f));
+                    Vector2 fPressure = -particleMass * pressureScalar * gradW;
+
+                    float lapW = _viscLapConst * (h - dist);
+                    Vector2 vij = particleVelocities[j] - particleVelocities[i];
+                    Vector2 fVisc = viscosity * particleMass * vij * lapW / Mathf.Max(rho_j, 1e-6f);
+
+                    Vector2 fTotal = fPressure + fVisc;
+
+                    if (enableCohesion)
+                    {
+                        float q = dist / h;
+                        if (q >= cohesionMinQ && q <= cohesionMaxQ)
+                        {
+                            float bandT = (q - cohesionMinQ) / Mathf.Max(cohesionMaxQ - cohesionMinQ, 1e-6f);
+                            float falloff = 1f - bandT;
+                            falloff *= falloff;
+                            fTotal += -dir * (cohesionStrength * falloff);
+                        }
+                    }
+
+                    float mag = fTotal.magnitude;
+                    if (mag > maxForceClamp) fTotal *= (maxForceClamp / mag);
+
+                    threadForces[threadId][i] += fTotal;
+                    threadForces[threadId][j] -= fTotal;
+                }
+            }
+            return threadId;
+        },
+        threadId => { });
+
+        // Combine thread-local forces
+        for (int t = 0; t < threadForces.Length; t++)
+            for (int i = 0; i < n; i++)
+                _forceAccum[i] += threadForces[t][i];
 
         for (int i = 0; i < n; i++)
         {
-            var rb = particles[i]?.GetComponent<Rigidbody2D>();
+            var rb = _rbCache[i];
             if (rb == null) continue;
             rb.AddForce(_forceAccum[i], ForceMode2D.Force);
         }
@@ -444,10 +607,12 @@ public class ParticleSpawner : MonoBehaviour
     // ---- Kernels ----
     void PrecomputeKernelConstants()
     {
+        if (!_kernelsDirty) return;
         float h = smoothingRadius;
-        _poly6Const = 4f / (Mathf.PI * Mathf.Pow(h, 8));
+        _poly6Const    = 4f / (Mathf.PI * Mathf.Pow(h, 8));
         _spikyGradConst = -30f / (Mathf.PI * Mathf.Pow(h, 5));
-        _viscLapConst = 20f / (3f * Mathf.PI * Mathf.Pow(h, 5));
+        _viscLapConst  = 20f / (3f * Mathf.PI * Mathf.Pow(h, 5));
+        _kernelsDirty = false;
     }
 
     // ---- Spawning ----
@@ -488,6 +653,8 @@ public class ParticleSpawner : MonoBehaviour
         particleVelocities = new Vector2[spawnCount];
         densities = new float[spawnCount];
         pressures = new float[spawnCount];
+        _rbCache = new Rigidbody2D[spawnCount];
+        _srCache = new SpriteRenderer[spawnCount];
 
         if (spawnOnFrameEdges)
         {
@@ -560,6 +727,9 @@ public class ParticleSpawner : MonoBehaviour
         particleVelocities[index] = Vector2.zero;
         densities[index] = restDensity;
         pressures[index] = 0f;
+
+        _rbCache[index] = rb;
+        _srCache[index] = p.GetComponent<SpriteRenderer>();
     }
 
     // ---- Boundary helpers ----
@@ -606,27 +776,28 @@ public class ParticleSpawner : MonoBehaviour
         if (particles == null) return;
         for (int i = 0; i < particles.Length; i++)
         {
-            var go = particles[i];
-            if (go == null) continue;
-            particlePositions[i] = go.transform.position;
-            var rb = go.GetComponent<Rigidbody2D>();
-            if (rb != null) particleVelocities[i] = rb.linearVelocity;
+            var rb = _rbCache[i];
+            if (rb == null) continue;
+#if UNITY_2022_1_OR_NEWER
+            particlePositions[i] = rb.position;
+            particleVelocities[i] = rb.linearVelocity;
+#else
+            particlePositions[i] = rb.position;
+            particleVelocities[i] = rb.velocity;
+#endif
         }
     }
 
     void ApplyVelocityColorVisualization()
     {
-        _colorFrameCounter = 0;
         if (!enableVelocityColor || particles == null) return;
         float maxSpeed = Mathf.Max(0.0001f, maxColorSpeed);
         for (int i = 0; i < particles.Length; i++)
         {
-            var go = particles[i];
-            if (go == null) continue;
-            var sr = go.GetComponent<SpriteRenderer>();
+            var sr = _srCache[i];
             if (sr == null) continue;
-            float speed = particleVelocities[i].magnitude;
-            float t = Mathf.Clamp01(speed / maxSpeed);
+            float speed = particleVelocities[i].sqrMagnitude; // squared
+            float t = Mathf.Clamp01(Mathf.Sqrt(speed) / maxSpeed);
             sr.color = velocityGradient.Evaluate(t);
         }
     }
