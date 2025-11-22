@@ -31,15 +31,6 @@ public class ParticleSpawner : MonoBehaviour
     public float viscosity = 0.1f;           // μ
     public float maxForceClamp = 200f;       // safety clamp
 
-    [Header("SPH Stability")]
-    public bool useTaitEquation = true;
-    public float taitGamma = 7f;
-    public int sphSubsteps = 2;
-    public bool autoRestDensityAtStart = true;
-    public float xsphFactor = 0.1f;
-    public bool usePositionalCorrection = true;
-    public float maxCompressionRatio = 1.5f; // if rho/ρ0 exceeds -> apply displacement
-
     [Header("Velocity Color")]
     public bool enableVelocityColor = true;
     public int velocityColorSkipFrames = 0;
@@ -96,34 +87,8 @@ public class ParticleSpawner : MonoBehaviour
     void Start()
     {
         SpawnAllInsideContainer();
-        if (autoRestDensityAtStart)
-            restDensity = ComputeAverageInitialDensity();
         ApplyAllToExistingParticles();
         ApplyParticleLayerSettings();
-    }
-
-    float ComputeAverageInitialDensity()
-    {
-        PrecomputeKernelConstants();
-        int n = particles.Length;
-        float h = smoothingRadius;
-        float h2 = h * h;
-        float sum = 0f;
-        for (int i = 0; i < n; i++)
-        {
-            Vector2 pi = particlePositions[i];
-            float rho = 0f;
-            for (int j = 0; j < n; j++)
-            {
-                Vector2 d = pi - particlePositions[j];
-                float r2 = d.sqrMagnitude;
-                if (r2 >= h2) continue;
-                float term = h2 - r2;
-                rho += particleMass * _poly6Const * term * term * term;
-            }
-            sum += rho;
-        }
-        return (n > 0) ? sum / n : 1f;
     }
 
     void Update()
@@ -174,11 +139,7 @@ public class ParticleSpawner : MonoBehaviour
 
     void FixedUpdate()
     {
-        if (useSPH)
-        {
-            for (int s = 0; s < Mathf.Max(1, sphSubsteps); s++)
-                SPHStep();
-        }
+        if (useSPH) SPHStep();
         else ApplyRepulsionForces();
     }
 
@@ -200,9 +161,9 @@ public class ParticleSpawner : MonoBehaviour
 
         float radius = particleDiameter * 0.5f;
         float minX = -halfWidth + radius + placementMargin;
-        float maxX =  halfWidth - radius - placementMargin;
+        float maxX = halfWidth - radius - placementMargin;
         float minY = -halfHeight + radius + placementMargin;
-        float maxY =  halfHeight - radius - placementMargin;
+        float maxY = halfHeight - radius - placementMargin;
 
         List<Vector2> placed = new List<Vector2>(spawnCount);
 
@@ -261,6 +222,9 @@ public class ParticleSpawner : MonoBehaviour
             pressures[i] = 0f;
         }
         particlePrefab.SetActive(false);
+
+        // After spawning
+        restDensity = ComputeAverageInitialDensity();
     }
 
     void CreateCircleSprite()
@@ -268,19 +232,19 @@ public class ParticleSpawner : MonoBehaviour
         if (circleSprite != null) return;
         int size = 64;
         Texture2D tex = new Texture2D(size, size, TextureFormat.ARGB32, false);
-        Color transparent = new Color(0,0,0,0);
+        Color transparent = new Color(0, 0, 0, 0);
         for (int y = 0; y < size; y++)
         {
             for (int x = 0; x < size; x++)
             {
                 float dx = (x - size / 2f) / (size / 2f);
                 float dy = (y - size / 2f) / (size / 2f);
-                float d = Mathf.Sqrt(dx*dx + dy*dy);
-                tex.SetPixel(x,y, d <= 1f ? Color.white : transparent);
+                float d = Mathf.Sqrt(dx * dx + dy * dy);
+                tex.SetPixel(x, y, d <= 1f ? Color.white : transparent);
             }
         }
         tex.Apply();
-        circleSprite = Sprite.Create(tex, new Rect(0,0,size,size), new Vector2(0.5f,0.5f), size);
+        circleSprite = Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), size);
     }
 
     GameObject CreateDefaultParticlePrefab()
@@ -402,14 +366,14 @@ public class ParticleSpawner : MonoBehaviour
         EnsureSPHArrays(n);
         PrecomputeKernelConstants();
         if (_forceAccum == null || _forceAccum.Length != n) _forceAccum = new Vector2[n];
-        if (_locks == null || _locks.Length != n) { _locks = new object[n]; for (int i = 0; i < n; i++) _locks[i] = new object(); }
-
+        if (_locks == null || _locks.Length != n)
+        {
+            _locks = new object[n];
+            for (int i = 0; i < n; i++) _locks[i] = new object();
+        }
         if (useParallel) ComputeDensitiesParallel(n); else ComputeDensities(n);
         ComputePressures(n);
         if (useParallel) ApplySPHForcesParallel(n); else ApplySPHForces(n);
-
-        if (xsphFactor > 0f) ApplyXSPH(n);
-        if (usePositionalCorrection) PositionalCompressionCorrection(n);
     }
 
     void ComputeDensitiesParallel(int n)
@@ -497,9 +461,9 @@ public class ParticleSpawner : MonoBehaviour
     void PrecomputeKernelConstants()
     {
         float h = smoothingRadius;
-        _poly6Const    = 4f  / (Mathf.PI * Mathf.Pow(h, 8));          // Poly6
-        _spikyGradConst= -30f/ (Mathf.PI * Mathf.Pow(h, 5));          // Spiky gradient
-        _viscLapConst  = 20f / (3f * Mathf.PI * Mathf.Pow(h, 5));     // Viscosity Laplacian
+        _poly6Const = 4f / (Mathf.PI * Mathf.Pow(h, 8));          // Poly6
+        _spikyGradConst = -30f / (Mathf.PI * Mathf.Pow(h, 5));          // Spiky gradient
+        _viscLapConst = 20f / (3f * Mathf.PI * Mathf.Pow(h, 5));     // Viscosity Laplacian
     }
 
     void ComputeDensities(int n)
@@ -526,82 +490,103 @@ public class ParticleSpawner : MonoBehaviour
 
     void ComputePressures(int n)
     {
-        if (useTaitEquation)
-        {
-            for (int i = 0; i < n; i++)
-            {
-                float rho = densities[i];
-                float ratio = rho / Mathf.Max(restDensity, 1e-6f);
-                float p = stiffness * (Mathf.Pow(ratio, taitGamma) - 1f);
-                pressures[i] = Mathf.Max(p, 0f);
-            }
-        }
-        else
-        {
-            for (int i = 0; i < n; i++)
-            {
-                float rho = densities[i];
-                pressures[i] = stiffness * Mathf.Max(rho - restDensity, 0f);
-            }
-        }
-    }
-
-    void ApplyXSPH(int n)
-    {
-        float h = smoothingRadius;
-        float h2 = h * h;
         for (int i = 0; i < n; i++)
         {
-            var goI = particles[i];
-            if (goI == null) continue;
-            Vector2 vi = particleVelocities[i];
-            Vector2 corr = Vector2.zero;
-            for (int j = 0; j < n; j++)
-            {
-                if (j == i || particles[j] == null) continue;
-                Vector2 d = particlePositions[i] - particlePositions[j];
-                float r2 = d.sqrMagnitude;
-                if (r2 >= h2) continue;
-                float term = h2 - r2;
-                float W = _poly6Const * term * term * term;
-                corr += (particleVelocities[j] - vi) * W * (particleMass / Mathf.Max(densities[j], 1e-6f));
-            }
-            Vector2 vNew = vi + xsphFactor * corr;
-            particleVelocities[i] = vNew;
-            var rb = goI.GetComponent<Rigidbody2D>();
-            if (rb != null) rb.linearVelocity = vNew;
+            float rho = densities[i];
+            pressures[i] = stiffness * Mathf.Max(rho - restDensity, 0f);
         }
     }
 
-    void PositionalCompressionCorrection(int n)
+    void ApplySPHForces(int n)
     {
         float h = smoothingRadius;
         for (int i = 0; i < n; i++)
         {
-            float rho_i = densities[i];
-            if (rho_i / Mathf.Max(restDensity,1e-6f) < maxCompressionRatio) continue;
             var goI = particles[i];
             if (goI == null) continue;
+            var rbI = goI.GetComponent<Rigidbody2D>();
+            if (rbI == null) continue;
+
             Vector2 pi = particlePositions[i];
-            Vector2 shift = Vector2.zero;
-            int count = 0;
-            for (int j = 0; j < n; j++)
+            float rho_i = densities[i];
+            float P_i = pressures[i];
+
+            for (int j = i + 1; j < n; j++)
             {
-                if (j == i || particles[j] == null) continue;
+                var goJ = particles[j];
+                if (goJ == null) continue;
+                var rbJ = goJ.GetComponent<Rigidbody2D>();
+                if (rbJ == null) continue;
+
                 Vector2 pj = particlePositions[j];
                 Vector2 delta = pi - pj;
                 float dist = delta.magnitude;
                 if (dist <= 0f || dist >= h) continue;
-                // Small outward push proportional to overlap
-                float w = (h - dist) / h;
-                shift += (delta / dist) * w * 0.001f; // tune factor
-                count++;
+
+                float rho_j = densities[j];
+                float P_j = pressures[j];
+
+                Vector2 dir = delta / dist;
+
+                // Spiky gradient
+                float gradMag = _spikyGradConst * (h - dist) * (h - dist);
+                Vector2 gradW = gradMag * dir;
+
+                // Pressure (symmetrized)
+                float pressureScalar = (P_i + P_j) / (2f * Mathf.Max(rho_i * rho_j, 1e-6f));
+                Vector2 fPressure = -particleMass * pressureScalar * gradW;
+
+                // Viscosity
+                float lapW = _viscLapConst * (h - dist);
+                Vector2 vij = particleVelocities[j] - particleVelocities[i];
+                Vector2 fVisc = viscosity * particleMass * vij * lapW / Mathf.Max(rho_j, 1e-6f);
+
+                Vector2 fTotal = fPressure + fVisc;
+                float mag = fTotal.magnitude;
+                if (mag > maxForceClamp)
+                    fTotal *= (maxForceClamp / mag);
+
+                rbI.AddForce(fTotal, ForceMode2D.Force);
+                rbJ.AddForce(-fTotal, ForceMode2D.Force);
             }
-            if (count > 0)
+        }
+    }
+
+    // ---------- SIMPLE REPULSION (LEGACY) ----------
+    void ApplyRepulsionForces()
+    {
+        if (particles == null) return;
+        int n = particles.Length;
+        UpdateParticleArrays();
+        float r = interactionRadius;
+        float rSqr = r * r;
+
+        for (int i = 0; i < n; i++)
+        {
+            var goI = particles[i];
+            if (goI == null) continue;
+            var rbI = goI.GetComponent<Rigidbody2D>();
+            if (rbI == null) continue;
+            Vector2 pi = particlePositions[i];
+
+            for (int j = i + 1; j < n; j++)
             {
-                Vector2 correction = shift / count;
-                goI.transform.position += (Vector3)correction;
-                particlePositions[i] = goI.transform.position;
+                var goJ = particles[j];
+                if (goJ == null) continue;
+                var rbJ = goJ.GetComponent<Rigidbody2D>();
+                if (rbJ == null) continue;
+
+                Vector2 pj = particlePositions[j];
+                Vector2 delta = pi - pj;
+                float distSqr = delta.sqrMagnitude;
+                if (distSqr > rSqr || distSqr < 1e-8f) continue;
+                float dist = Mathf.Sqrt(distSqr);
+                float falloff = 1f - dist / r;
+                float fMag = repulsionStrength * falloff;
+                Vector2 forceDir = delta / dist;
+                Vector2 force = forceDir * fMag;
+                rbI.AddForce(force, ForceMode2D.Force);
+                rbJ.AddForce(-force, ForceMode2D.Force);
             }
         }
     }
@@ -659,4 +644,27 @@ public class ParticleSpawner : MonoBehaviour
     }
 
     public int ParticleCount => particles?.Length ?? 0;
+    float ComputeAverageInitialDensity()
+    {
+        PrecomputeKernelConstants();
+        int n = particles.Length;
+        float h = smoothingRadius;
+        float h2 = h * h;
+        float sum = 0f;
+        for (int i = 0; i < n; i++)
+        {
+            Vector2 pi = particlePositions[i];
+            float rho = 0f;
+            for (int j = 0; j < n; j++)
+            {
+                Vector2 d = pi - particlePositions[j];
+                float r2 = d.sqrMagnitude;
+                if (r2 >= h2) continue;
+                float term = h2 - r2;
+                rho += particleMass * _poly6Const * term * term * term;
+            }
+            sum += rho;
+        }
+        return (n > 0) ? sum / n : restDensity;
+    }
 }
