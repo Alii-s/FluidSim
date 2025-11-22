@@ -225,7 +225,7 @@ Camera:
   far clip plane: 1000
   field of view: 34
   orthographic: 1
-  orthographic size: 4.1275
+  orthographic size: 6.9343753
   m_Depth: -1
   m_CullingMask:
     serializedVersion: 2
@@ -578,8 +578,8 @@ Transform:
   m_GameObject: {fileID: 740787667}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: -5.81, y: 0, z: 0}
-  m_LocalScale: {x: 0.5, y: 4.9, z: 1}
+  m_LocalPosition: {x: -10.8, y: 0, z: 0}
+  m_LocalScale: {x: 0.5, y: 8.139999, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 1097101909}
@@ -743,8 +743,8 @@ Transform:
   m_GameObject: {fileID: 886200956}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 5.81, y: 0, z: 0}
-  m_LocalScale: {x: 0.5, y: 4.9, z: 1}
+  m_LocalPosition: {x: 10.8, y: 0, z: 0}
+  m_LocalScale: {x: 0.5, y: 8.139999, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 1097101909}
@@ -909,8 +909,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 5bb610c05ffa54a4cbc164a74bce1ebb, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ContainerBuilder
-  width: 11.12
-  height: 4.4
+  width: 21.1
+  height: 7.64
   wallThickness: 0.5
   wallColor: {r: 1, g: 0.53705585, b: 0, a: 1}
   cameraMargin: 1
@@ -963,7 +963,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ParticleSpawner
   particlePrefab: {fileID: 0}
-  spawnCount: 50
+  spawnCount: 100
   particleDiameter: 0.18
   bounce: 0.05
   damping: 1
@@ -971,6 +971,25 @@ MonoBehaviour:
   gravityTransitionSpeed: 10
   maxPlacementAttemptsPerParticle: 50
   placementMargin: 0.01
+  interactionRadius: 0.4
+  repulsionStrength: 10
+  useSPH: 1
+  smoothingRadius: 0.4
+  restDensity: 1
+  particleMass: 1
+  stiffness: 50
+  viscosity: 0.1
+  maxForceClamp: 200
+  enableVelocityColor: 1
+  velocityColorSkipFrames: 0
+  maxColorSpeed: 5
+  slowColor: {r: 0, g: 1, b: 0.9394512, a: 1}
+  fastColor: {r: 1, g: 0, b: 0, a: 1}
+  disableParticleSelfCollision: 1
+  particleLayerName: Particles
+  particles: []
+  particlePositions: []
+  particleVelocities: []
 --- !u!4 &1342970094
 Transform:
   m_ObjectHideFlags: 0
@@ -1060,8 +1079,8 @@ Transform:
   m_GameObject: {fileID: 1896692737}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: -2.45, z: 0}
-  m_LocalScale: {x: 12.12, y: 0.5, z: 1}
+  m_LocalPosition: {x: 0, y: -4.0699997, z: 0}
+  m_LocalScale: {x: 22.1, y: 0.5, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 1097101909}
